@@ -464,6 +464,9 @@ async fn create_group_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Broadcast system join message
+    broadcast_group_system_message(&state, &group_id, "Group created").await;
+
     // Log membership event as system audit log
     let _ = state.audit_repo.log_event(&AuditLog {
         id: Uuid::new_v4(),
@@ -543,6 +546,9 @@ async fn invite_member_handler(
         .add_member(&new_member)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Broadcast system join message
+    broadcast_group_system_message(&state, &payload.group_id, &format!("{} joined the group", target_user.username)).await;
 
     // Log membership event as system audit log
     let _ = state.audit_repo.log_event(&AuditLog {
@@ -626,6 +632,11 @@ async fn remove_member_handler(
         .remove_member(&payload.group_id, &payload.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Broadcast system leave message
+    let target_user = state.user_repo.get_user_by_id(&payload.user_id).await.ok().flatten();
+    let target_name = target_user.map(|u| u.username).unwrap_or_else(|| "User".to_string());
+    broadcast_group_system_message(&state, &payload.group_id, &format!("{} left the group", target_name)).await;
 
     // Log membership event as system audit log
     let _ = state.audit_repo.log_event(&AuditLog {
@@ -738,4 +749,60 @@ async fn register_push_token_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(StatusCode::OK)
+}
+
+use axum::extract::ws::Message;
+use crate::domain::messaging::Envelope;
+
+async fn broadcast_group_system_message(
+    state: &AppState,
+    group_id: &Uuid,
+    text: &str,
+) {
+    if let Ok(members) = state.group_repo.get_group_members(group_id).await {
+        for m in members {
+            if let Ok(devices) = state.device_repo.get_devices_by_user_id(&m.user_id).await {
+                for d in devices {
+                    if d.approval_status == crate::domain::device::DeviceApprovalStatus::Approved && d.deleted_at.is_none() {
+                        let envelope = Envelope {
+                            message_id: Uuid::new_v4(),
+                            conversation_id: *group_id,
+                            sender_device_id: Uuid::nil(),
+                            recipient_device_id: d.id,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                            dh_pub: vec![0; 32],
+                            ciphertext: text.as_bytes().to_vec(),
+                            signature: vec![0; 64],
+                            major_version: 1,
+                            minor_version: 0,
+                            message_number: 0,
+                        };
+                        if let Ok(bin) = envelope.to_cbor() {
+                            let peers = state.active_peers.lock().await;
+                            if let Some(peer_sender) = peers.get(&d.id) {
+                                let _ = peer_sender.send(Message::Binary(bin));
+                            } else {
+                                // Device is offline: queue it in database
+                                if let Some(pool) = &state.pg_pool {
+                                    let _ = sqlx::query(
+                                        "INSERT INTO pending_messages (id, sender_id, recipient_id, recipient_device_id, client_message_id, encrypted_payload, message_type, message_size, delivery_status, expires_at) \
+                                         VALUES ($1, $2, $3, $4, $5, $6, 'system', $7, 'queued', NOW() + INTERVAL '7 days')"
+                                    )
+                                    .bind(Uuid::new_v4())
+                                    .bind(m.user_id)
+                                    .bind(m.user_id)
+                                    .bind(d.id)
+                                    .bind(envelope.message_id)
+                                    .bind(&bin)
+                                    .bind(bin.len() as i32)
+                                    .execute(pool)
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
