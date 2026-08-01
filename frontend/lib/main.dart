@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'application/auth_provider.dart';
+import 'infrastructure/bip39.dart';
 
 void main() {
   debugPrint('[VeilApp] Entry point main() triggered.');
@@ -150,8 +151,167 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   bool _isRegistering = false;
   String _displayName = 'User';
 
+  // BIP-39 mnemonic generation state
+  String? _generatedMnemonic;
+  bool _hasConfirmedMnemonic = false;
+
   @override
   Widget build(BuildContext context) {
+    if (_isRegistering && _generatedMnemonic != null) {
+      return _buildMnemonicConfirmationScreen();
+    }
+    return _buildLoginForm();
+  }
+
+  Widget _buildMnemonicConfirmationScreen() {
+    final words = _generatedMnemonic!.split(' ');
+    final username = _usernameController.text.trim();
+    final password = _passwordController.text.trim();
+    final deviceName = _deviceNameController.text.trim();
+
+    return Scaffold(
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24.0),
+          child: Card(
+            color: const Color(0xFF1E1E2E),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: Colors.deepPurpleAccent, width: 0.5),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Icon(
+                    Icons.warning_amber_rounded,
+                    color: Colors.amber,
+                    size: 48,
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Save Your Recovery Key',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'This 24-word phrase is the only way to recover your account if you lose your password. Write it down and store it in a secure offline location.',
+                    style: TextStyle(fontSize: 13, color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 24),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F0F15),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.withOpacity(0.3)),
+                    ),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: List.generate(words.length, (index) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.deepPurpleAccent.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            '${index + 1}. ${words[index]}',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontFamily: 'monospace',
+                              fontWeight: FontWeight.bold,
+                              color: Colors.purpleAccent,
+                            ),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  CheckboxListTile(
+                    title: const Text(
+                      "I have securely written down and backed up this 24-word recovery phrase.",
+                      style: TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                    value: _hasConfirmedMnemonic,
+                    activeColor: Colors.deepPurpleAccent,
+                    onChanged: (val) {
+                      setState(() {
+                        _hasConfirmedMnemonic = val ?? false;
+                      });
+                    },
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.deepPurpleAccent,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    onPressed: _hasConfirmedMnemonic
+                        ? () {
+                            debugPrint('[LoginPage] Register submit clicked with mnemonic.');
+                            ref.read(authProvider.notifier).register(
+                              username: username,
+                              password: password,
+                              recoveryMnemonic: _generatedMnemonic!,
+                              displayName: _displayName,
+                              deviceName: deviceName,
+                              deviceType: 'mobile',
+                              platform: 'android',
+                              appVersion: '1.0.0',
+                              devicePublicKey: [1, 2, 3],
+                              verificationFingerprint: 'mock_fingerprint',
+                            );
+                            setState(() {
+                              _generatedMnemonic = null;
+                              _hasConfirmedMnemonic = false;
+                            });
+                          }
+                        : null,
+                    child: const Text(
+                      'Confirm & Register',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _generatedMnemonic = null;
+                      });
+                    },
+                    child: const Text(
+                      'Go Back',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoginForm() {
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
@@ -245,18 +405,10 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
                       debugPrint('[LoginPage] Submit clicked. isRegistering=$_isRegistering');
                       if (_isRegistering) {
-                        ref.read(authProvider.notifier).register(
-                          username: username,
-                          password: password,
-                          recoveryMnemonic: 'mock mnemonic phrase here',
-                          displayName: _displayName,
-                          deviceName: deviceName,
-                          deviceType: 'mobile',
-                          platform: 'android',
-                          appVersion: '1.0.0',
-                          devicePublicKey: [1, 2, 3], // mock keys
-                          verificationFingerprint: 'mock_fingerprint',
-                        );
+                        setState(() {
+                          _generatedMnemonic = Bip39Mnemonic.generate();
+                          _hasConfirmedMnemonic = false;
+                        });
                       } else {
                         ref.read(authProvider.notifier).login(
                           identifier: username,
@@ -271,8 +423,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                       }
                     },
                     child: Text(
-                      _isRegistering ? 'Register' : 'Login',
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      _isRegistering ? 'Generate Recovery Phrase & Register' : 'Login',
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -280,6 +432,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     onPressed: () {
                       setState(() {
                         _isRegistering = !_isRegistering;
+                        _generatedMnemonic = null;
+                        _hasConfirmedMnemonic = false;
                       });
                     },
                     child: Text(
