@@ -1,0 +1,21 @@
+# Private configurations
+.env
+verify_results.json
+
+# Rust build artifacts
+backend/target/
+backend/target_test/
+backend/target_test2/
+backend/target_test3/
+backend/target_test4/
+target/
+
+# Local uploader uploads
+backend/uploads/
+uploads/
+
+# IDE / OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

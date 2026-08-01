@@ -1,0 +1,42 @@
+[package]
+name = "veil_backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web framework & async runtime
+axum = { version = "0.7.5", features = ["ws"] }
+tokio = { version = "1.38.0", features = ["full"] }
+tower-http = { version = "0.5.2", features = ["fs", "cors", "trace"] }
+
+# Database
+sqlx = { version = "0.7.4", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+
+# Serialization
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.119"
+uuid = { version = "1.9.1", features = ["v4", "serde"] }
+
+# Cryptography & Security
+argon2 = "0.5.3"
+chacha20poly1305 = "0.10.1"
+curve25519-dalek = { version = "4.1.3", features = ["rand_core"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
+rand = "0.8.5"
+
+# Utilities & Diagnostics
+anyhow = "1.0.86"
+thiserror = "1.0.61"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+unicode-normalization = "0.1.25"
+subtle = "2.6.1"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+hex = "0.4.3"
+async-trait = "0.1.81"
+ciborium = "0.2.2"
+axum-extra = { version = "0.9.3", features = ["typed-header"] }
+futures-util = "=0.3.31"

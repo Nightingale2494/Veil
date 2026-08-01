@@ -1,0 +1,44 @@
+name: Veil Continuous Integration
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Linting check
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Tests (Debug - Workspace)
+        run: cargo test --workspace --all-features
+
+      - name: Run Tests (Release - Workspace)
+        run: cargo test --workspace --all-features --release
+
+      - name: Install cargo-audit & cargo-deny
+        run: |
+          cargo install cargo-audit
+          cargo install cargo-deny
+
+      - name: Vulnerability Audit
+        run: cargo audit
+
+      - name: License and Dependency Check
+        run: cargo deny check
