@@ -1,0 +1,17 @@
+[Unit]
+Description=Veil Secure Messaging Service Backend
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=veil
+Group=veil
+WorkingDirectory=/var/lib/veil
+EnvironmentFile=/etc/veil/veil.env
+ExecStart=/opt/veil/veil_backend
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
