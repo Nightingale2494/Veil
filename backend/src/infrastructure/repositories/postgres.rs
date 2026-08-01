@@ -6,11 +6,12 @@ use uuid::Uuid;
 
 use crate::domain::{
     device::{Device, DeviceApprovalStatus},
+    group::{Group, GroupMember, GroupRole},
     messaging::{AttachmentBlob, PreKeyBundle},
     repositories::{
         AttachmentRepository, AuditLogRepository, DeviceRepository, DeviceSessionRepository,
-        LoginAttemptRepository, PreKeyRepository, RecoveryAttemptRepository, ReplayCacheRepository,
-        SessionRepository, UserRepository,
+        GroupRepository, LoginAttemptRepository, PreKeyRepository, PushTokenRepository,
+        RecoveryAttemptRepository, ReplayCacheRepository, SessionRepository, UserRepository,
     },
     session::{AuditLog, LoginAttempt, RecoveryAttempt, Session},
     user::{User, UserSettings},
@@ -886,5 +887,164 @@ impl AttachmentRepository for PostgresRepository {
             .await
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl GroupRepository for PostgresRepository {
+    async fn create_group(&self, group: &Group, owner_id: &Uuid) -> Result<(), Error> {
+        let mut tx = self.pool.begin().await.map_err(|e| Error::DatabaseError(e.to_string()))?;
+        
+        sqlx::query("INSERT INTO groups (id, name, created_at) VALUES ($1, $2, $3)")
+            .bind(group.id)
+            .bind(&group.name)
+            .bind(group.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        sqlx::query("INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES ($1, $2, 'owner', NOW())")
+            .bind(group.id)
+            .bind(owner_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        tx.commit().await.map_err(|e| Error::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_group_by_id(&self, id: &Uuid) -> Result<Option<Group>, Error> {
+        let row = sqlx::query("SELECT id, name, created_at FROM groups WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        if let Some(r) = row {
+            Ok(Some(Group {
+                id: r.get("id"),
+                name: r.get("name"),
+                created_at: r.get("created_at"),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_group_members(&self, group_id: &Uuid) -> Result<Vec<GroupMember>, Error> {
+        let rows = sqlx::query("SELECT group_id, user_id, role, joined_at FROM group_members WHERE group_id = $1")
+            .bind(group_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        let list = rows
+            .into_iter()
+            .map(|r| {
+                let role_str: String = r.get("role");
+                let role = GroupRole::from_str(&role_str).unwrap_or(GroupRole::Member);
+                GroupMember {
+                    group_id: r.get("group_id"),
+                    user_id: r.get("user_id"),
+                    role,
+                    joined_at: r.get("joined_at"),
+                }
+            })
+            .collect();
+        Ok(list)
+    }
+
+    async fn get_member_role(&self, group_id: &Uuid, user_id: &Uuid) -> Result<Option<GroupRole>, Error> {
+        let row = sqlx::query("SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        if let Some(r) = row {
+            let role_str: String = r.get("role");
+            Ok(GroupRole::from_str(&role_str))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn add_member(&self, member: &GroupMember) -> Result<(), Error> {
+        sqlx::query("INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES ($1, $2, $3, $4) ON CONFLICT (group_id, user_id) DO NOTHING")
+            .bind(member.group_id)
+            .bind(member.user_id)
+            .bind(member.role.as_str())
+            .bind(member.joined_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_member(&self, group_id: &Uuid, user_id: &Uuid) -> Result<(), Error> {
+        sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn update_member_role(&self, group_id: &Uuid, user_id: &Uuid, role: GroupRole) -> Result<(), Error> {
+        sqlx::query("UPDATE group_members SET role = $3 WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id)
+            .bind(role.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_user_groups(&self, user_id: &Uuid) -> Result<Vec<Group>, Error> {
+        let rows = sqlx::query(
+            "SELECT g.id, g.name, g.created_at FROM groups g \
+             JOIN group_members m ON g.id = m.group_id \
+             WHERE m.user_id = $1"
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        let list = rows
+            .into_iter()
+            .map(|r| Group {
+                id: r.get("id"),
+                name: r.get("name"),
+                created_at: r.get("created_at"),
+            })
+            .collect();
+        Ok(list)
+    }
+}
+
+#[async_trait]
+impl PushTokenRepository for PostgresRepository {
+    async fn register_token(&self, device_id: &Uuid, token: &str) -> Result<(), Error> {
+        sqlx::query("INSERT INTO push_tokens (device_id, fcm_token, registered_at) VALUES ($1, $2, NOW()) ON CONFLICT (device_id) DO UPDATE SET fcm_token = EXCLUDED.fcm_token, registered_at = NOW()")
+            .bind(device_id)
+            .bind(token)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_token_by_device_id(&self, device_id: &Uuid) -> Result<Option<String>, Error> {
+        let row = sqlx::query("SELECT fcm_token FROM push_tokens WHERE device_id = $1")
+            .bind(device_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        Ok(row.map(|r| r.get("fcm_token")))
     }
 }

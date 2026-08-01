@@ -7,8 +7,8 @@ mod presentation;
 
 use crate::domain::repositories::{
     AttachmentRepository, AuditLogRepository, DeviceRepository, DeviceSessionRepository,
-    LoginAttemptRepository, PreKeyRepository, RecoveryAttemptRepository, ReplayCacheRepository,
-    SessionRepository, UserRepository,
+    GroupRepository, LoginAttemptRepository, PreKeyRepository, PushTokenRepository,
+    RecoveryAttemptRepository, ReplayCacheRepository, SessionRepository, UserRepository,
 };
 use axum::{
     extract::Request,
@@ -58,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 active_peers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 attachment_repo: pg_repo.clone() as Arc<dyn AttachmentRepository>,
                 pg_pool: Some(db.pool),
+                group_repo: pg_repo.clone() as Arc<dyn GroupRepository>,
+                push_token_repo: pg_repo.clone() as Arc<dyn PushTokenRepository>,
             }
         }
         Err(e) => {
@@ -82,6 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 active_peers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 attachment_repo: mock_repo.clone() as Arc<dyn AttachmentRepository>,
                 pg_pool: None,
+                group_repo: mock_repo.clone() as Arc<dyn GroupRepository>,
+                push_token_repo: mock_repo.clone() as Arc<dyn PushTokenRepository>,
             }
         }
     };

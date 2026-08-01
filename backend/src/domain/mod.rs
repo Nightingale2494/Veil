@@ -1,6 +1,7 @@
 // backend/src/domain/mod.rs
 
 pub mod device;
+pub mod group;
 pub mod messaging;
 pub mod repositories;
 pub mod session;

@@ -8,11 +8,12 @@ use uuid::Uuid;
 
 use crate::domain::{
     device::{Device, DeviceApprovalStatus},
+    group::{Group, GroupMember, GroupRole},
     messaging::{AttachmentBlob, PreKeyBundle},
     repositories::{
         AttachmentRepository, AuditLogRepository, DeviceRepository, DeviceSessionRepository,
-        LoginAttemptRepository, PreKeyRepository, RecoveryAttemptRepository, ReplayCacheRepository,
-        SessionRepository, UserRepository,
+        GroupRepository, LoginAttemptRepository, PreKeyRepository, PushTokenRepository,
+        RecoveryAttemptRepository, ReplayCacheRepository, SessionRepository, UserRepository,
     },
     session::{AuditLog, LoginAttempt, RecoveryAttempt, Session},
     user::{User, UserSettings},
@@ -37,6 +38,11 @@ pub struct InMemoryRepository {
 
     // Phase 4 additions
     pub attachments: Mutex<HashMap<Uuid, AttachmentBlob>>,
+
+    // Group & Notification additions
+    pub groups: Mutex<HashMap<Uuid, Group>>,
+    pub group_members: Mutex<HashMap<Uuid, Vec<GroupMember>>>,
+    pub push_tokens: Mutex<HashMap<Uuid, String>>,
 }
 
 impl InMemoryRepository {
@@ -65,6 +71,9 @@ impl InMemoryRepository {
             device_sessions: Mutex::new(HashMap::new()),
             replay_cache: Mutex::new(HashSet::new()),
             attachments: Mutex::new(HashMap::new()),
+            groups: Mutex::new(HashMap::new()),
+            group_members: Mutex::new(HashMap::new()),
+            push_tokens: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -537,5 +546,98 @@ impl AttachmentRepository for InMemoryRepository {
         let mut atts = self.attachments.lock().await;
         atts.remove(id);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl GroupRepository for InMemoryRepository {
+    async fn create_group(&self, group: &Group, owner_id: &Uuid) -> Result<(), Error> {
+        let mut groups = self.groups.lock().await;
+        groups.insert(group.id, group.clone());
+
+        let mut members = self.group_members.lock().await;
+        let owner_member = GroupMember {
+            group_id: group.id,
+            user_id: *owner_id,
+            role: GroupRole::Owner,
+            joined_at: Utc::now(),
+        };
+        members.insert(group.id, vec![owner_member]);
+        Ok(())
+    }
+
+    async fn get_group_by_id(&self, id: &Uuid) -> Result<Option<Group>, Error> {
+        let groups = self.groups.lock().await;
+        Ok(groups.get(id).cloned())
+    }
+
+    async fn get_group_members(&self, group_id: &Uuid) -> Result<Vec<GroupMember>, Error> {
+        let members = self.group_members.lock().await;
+        Ok(members.get(group_id).cloned().unwrap_or_default())
+    }
+
+    async fn get_member_role(&self, group_id: &Uuid, user_id: &Uuid) -> Result<Option<GroupRole>, Error> {
+        let members = self.group_members.lock().await;
+        if let Some(list) = members.get(group_id) {
+            let role = list.iter().find(|m| m.user_id == *user_id).map(|m| m.role.clone());
+            Ok(role)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn add_member(&self, member: &GroupMember) -> Result<(), Error> {
+        let mut members = self.group_members.lock().await;
+        let list = members.entry(member.group_id).or_insert_with(Vec::new);
+        if !list.iter().any(|m| m.user_id == member.user_id) {
+            list.push(member.clone());
+        }
+        Ok(())
+    }
+
+    async fn remove_member(&self, group_id: &Uuid, user_id: &Uuid) -> Result<(), Error> {
+        let mut members = self.group_members.lock().await;
+        if let Some(list) = members.get_mut(group_id) {
+            list.retain(|m| m.user_id != *user_id);
+        }
+        Ok(())
+    }
+
+    async fn update_member_role(&self, group_id: &Uuid, user_id: &Uuid, role: GroupRole) -> Result<(), Error> {
+        let mut members = self.group_members.lock().await;
+        if let Some(list) = members.get_mut(group_id) {
+            if let Some(m) = list.iter_mut().find(|m| m.user_id == *user_id) {
+                m.role = role;
+            }
+        }
+        Ok(())
+    }
+
+    async fn get_user_groups(&self, user_id: &Uuid) -> Result<Vec<Group>, Error> {
+        let groups = self.groups.lock().await;
+        let members = self.group_members.lock().await;
+        let mut result = Vec::new();
+        for (gid, m_list) in members.iter() {
+            if m_list.iter().any(|m| m.user_id == *user_id) {
+                if let Some(g) = groups.get(gid) {
+                    result.push(g.clone());
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl PushTokenRepository for InMemoryRepository {
+    async fn register_token(&self, device_id: &Uuid, token: &str) -> Result<(), Error> {
+        let mut tokens = self.push_tokens.lock().await;
+        tokens.insert(*device_id, token.to_string());
+        Ok(())
+    }
+
+    async fn get_token_by_device_id(&self, device_id: &Uuid) -> Result<Option<String>, Error> {
+        let tokens = self.push_tokens.lock().await;
+        Ok(tokens.get(device_id).cloned())
     }
 }

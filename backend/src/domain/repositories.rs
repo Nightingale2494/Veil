@@ -143,3 +143,23 @@ pub trait AttachmentRepository: Send + Sync {
     async fn get_expired_blobs(&self, days_old: i32) -> Result<Vec<AttachmentBlob>, Error>;
     async fn delete_blob_permanently(&self, id: &Uuid) -> Result<(), Error>;
 }
+
+use crate::domain::group::{Group, GroupMember, GroupRole};
+
+#[async_trait]
+pub trait GroupRepository: Send + Sync {
+    async fn create_group(&self, group: &Group, owner_id: &Uuid) -> Result<(), Error>;
+    async fn get_group_by_id(&self, id: &Uuid) -> Result<Option<Group>, Error>;
+    async fn get_group_members(&self, group_id: &Uuid) -> Result<Vec<GroupMember>, Error>;
+    async fn get_member_role(&self, group_id: &Uuid, user_id: &Uuid) -> Result<Option<GroupRole>, Error>;
+    async fn add_member(&self, member: &GroupMember) -> Result<(), Error>;
+    async fn remove_member(&self, group_id: &Uuid, user_id: &Uuid) -> Result<(), Error>;
+    async fn update_member_role(&self, group_id: &Uuid, user_id: &Uuid, role: GroupRole) -> Result<(), Error>;
+    async fn get_user_groups(&self, user_id: &Uuid) -> Result<Vec<Group>, Error>;
+}
+
+#[async_trait]
+pub trait PushTokenRepository: Send + Sync {
+    async fn register_token(&self, device_id: &Uuid, token: &str) -> Result<(), Error>;
+    async fn get_token_by_device_id(&self, device_id: &Uuid) -> Result<Option<String>, Error>;
+}

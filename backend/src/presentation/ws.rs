@@ -112,7 +112,34 @@ async fn handle_socket(socket: WebSocket, device_id: Uuid, state: Arc<AppState>)
     // 1. Register connection as active peer
     {
         let mut peers = state.active_peers.lock().await;
-        peers.insert(device_id, tx);
+        peers.insert(device_id, tx.clone());
+    }
+
+    // Deliver pending messages (if any)
+    if let Some(pool) = &state.pg_pool {
+        let pool_clone = pool.clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let pending_rows = sqlx::query(
+                "SELECT id, encrypted_payload FROM pending_messages WHERE recipient_device_id = $1 AND delivery_status = 'queued' ORDER BY created_at ASC"
+            )
+            .bind(device_id)
+            .fetch_all(&pool_clone)
+            .await;
+            if let Ok(rows) = pending_rows {
+                for r in rows {
+                    use sqlx::Row;
+                    let pid: Uuid = r.get("id");
+                    let payload: Vec<u8> = r.get("encrypted_payload");
+                    if tx_clone.send(Message::Binary(payload)).is_ok() {
+                        let _ = sqlx::query("DELETE FROM pending_messages WHERE id = $1")
+                            .bind(pid)
+                            .execute(&pool_clone)
+                            .await;
+                    }
+                }
+            }
+        });
     }
 
     // 2. Spawn forwarding task: listens on rx channel and sends to WebSocket sink
@@ -218,10 +245,56 @@ async fn handle_socket(socket: WebSocket, device_id: Uuid, state: Arc<AppState>)
                         };
 
                         if !relayed {
-                            // Recipient is offline: store inside pending_messages (to be delivered upon client reconnect)
-                            // Note: Server-side database insert for offline delivery queues. TTL = 7 days
-                            // For Phase 3, we mock this by checking database repository.
                             info!("Recipient device {} is offline. Queueing message for offline delivery.", recipient_id);
+                            
+                            // Query sender and recipient user IDs from devices
+                            if let Some(pool) = &state.pg_pool {
+                                let pool_clone = pool.clone();
+                                let bin_clone = bin.clone();
+                                let envelope_msg_id = envelope.message_id;
+                                tokio::spawn(async move {
+                                    use sqlx::Row;
+                                    let target_device = sqlx::query("SELECT user_id FROM devices WHERE id = $1")
+                                        .bind(recipient_id)
+                                        .fetch_optional(&pool_clone)
+                                        .await;
+                                    if let Ok(Some(row)) = target_device {
+                                        let target_user_id: Uuid = row.get("user_id");
+                                        let sender_device = sqlx::query("SELECT user_id FROM devices WHERE id = $1")
+                                            .bind(device_id)
+                                            .fetch_optional(&pool_clone)
+                                            .await;
+                                        if let Ok(Some(s_row)) = sender_device {
+                                            let sender_user_id: Uuid = s_row.get("user_id");
+                                            
+                                            // Insert message
+                                            let _ = sqlx::query(
+                                                "INSERT INTO pending_messages (id, sender_id, recipient_id, recipient_device_id, client_message_id, encrypted_payload, message_type, message_size, delivery_status, expires_at) \
+                                                 VALUES ($1, $2, $3, $4, $5, $6, 'text', $7, 'queued', NOW() + INTERVAL '7 days')"
+                                            )
+                                            .bind(Uuid::new_v4())
+                                            .bind(sender_user_id)
+                                            .bind(target_user_id)
+                                            .bind(recipient_id)
+                                            .bind(envelope_msg_id)
+                                            .bind(&bin_clone)
+                                            .bind(bin_clone.len() as i32)
+                                            .execute(&pool_clone)
+                                            .await;
+                                        }
+                                    }
+                                });
+                            }
+
+                            // Query token & send push notification
+                            let push_repo = state.push_token_repo.clone();
+                            tokio::spawn(async move {
+                                if let Ok(Some(token)) = push_repo.get_token_by_device_id(&recipient_id).await {
+                                    use crate::infrastructure::notifications::{MockNotificationProvider, NotificationProvider};
+                                    let provider = MockNotificationProvider;
+                                    let _ = provider.send_silent_push(&token, &recipient_id).await;
+                                }
+                            });
                         }
                     }
                     Err(e) => {
