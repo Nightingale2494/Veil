@@ -206,7 +206,7 @@ impl DeviceRepository for PostgresRepository {
         .bind(&device.platform)
         .bind(&device.app_version)
         .bind(&device.device_public_key)
-        .bind(device.approval_status.as_str())
+        .bind(&device.approval_status)
         .bind(&device.verification_fingerprint)
         .bind(device.created_at)
         .bind(device.last_active_at)
@@ -251,7 +251,7 @@ impl DeviceRepository for PostgresRepository {
     ) -> Result<(), Error> {
         sqlx::query("UPDATE devices SET approval_status = $2::device_approval_status, last_active_at = NOW() WHERE id = $1")
             .bind(id)
-            .bind(status.as_str())
+            .bind(status)
             .execute(&self.pool)
             .await
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
@@ -723,10 +723,7 @@ fn map_user_row(r: sqlx::postgres::PgRow) -> Result<User, Error> {
 }
 
 fn map_device_row(r: sqlx::postgres::PgRow) -> Result<Device, Error> {
-    let approval_str: String = r.get("approval_status");
-    let approval_status = DeviceApprovalStatus::from_str(&approval_str).ok_or_else(|| {
-        Error::DatabaseError("Invalid device approval status in database".to_string())
-    })?;
+    let approval_status: DeviceApprovalStatus = r.get("approval_status");
 
     Ok(Device {
         id: r.get("id"),

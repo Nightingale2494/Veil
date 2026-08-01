@@ -236,6 +236,7 @@ impl<'a> LoginUseCase<'a> {
             .await?;
 
         if failed_attempts >= 5 {
+            tracing::error!("Rate limit exceeded for user identifier: {}", req.identifier);
             return Err(Error::Unauthorized(
                 "Too many failed login attempts. Please wait 15 minutes.".into(),
             ));
@@ -258,6 +259,7 @@ impl<'a> LoginUseCase<'a> {
         let user = match user_option {
             Some(u) => u,
             None => {
+                tracing::error!("Login user not found: {}", req.identifier);
                 // Log failed attempt to prevent timing attacks disclosures
                 let attempt = LoginAttempt {
                     id: Uuid::new_v4(),
@@ -279,6 +281,7 @@ impl<'a> LoginUseCase<'a> {
             .verify_password(pwd.as_bytes(), &user.password_hash)?;
 
         if !is_valid {
+            tracing::error!("Login invalid password for username: {}", user.username);
             let attempt = LoginAttempt {
                 id: Uuid::new_v4(),
                 ip_hash: ip_hash.to_string(),
@@ -308,6 +311,7 @@ impl<'a> LoginUseCase<'a> {
                     .count_active_devices_by_user_id(&user.id)
                     .await?;
                 if active_devices_count >= 10 {
+                    tracing::error!("Login failed: maximum devices (10) reached for user {}", user.username);
                     return Err(Error::ValidationError(
                         "Maximum device limit (10) reached. Revoke an old device first.".into(),
                     ));
