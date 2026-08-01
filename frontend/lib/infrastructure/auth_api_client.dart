@@ -160,4 +160,96 @@ class AuthApiClient {
 
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
+
+  Future<Map<String, dynamic>> createGroup(String sessionToken, String name) async {
+    final url = Uri.parse('$baseUrl/api/v1/auth/groups/create');
+    print('[AuthApiClient] Sending POST request to: $url');
+    final response = await _client.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $sessionToken',
+      },
+      body: jsonEncode({'name': name}),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<void> inviteMember(String sessionToken, String groupId, String usernameOrId) async {
+    final url = Uri.parse('$baseUrl/api/v1/auth/groups/invite');
+    print('[AuthApiClient] Sending POST request to: $url');
+    final response = await _client.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $sessionToken',
+      },
+      body: jsonEncode({
+        'group_id': groupId,
+        'username_or_id': usernameOrId,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+  }
+
+  Future<void> removeMember(String sessionToken, String groupId, String userId) async {
+    final url = Uri.parse('$baseUrl/api/v1/auth/groups/remove');
+    print('[AuthApiClient] Sending POST request to: $url');
+    final response = await _client.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $sessionToken',
+      },
+      body: jsonEncode({
+        'group_id': groupId,
+        'user_id': userId,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+  }
+
+  Future<Map<String, dynamic>> getGroups(String sessionToken) async {
+    final url = Uri.parse('$baseUrl/api/v1/auth/groups');
+    print('[AuthApiClient] Sending GET request to: $url');
+    final response = await _client.get(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $sessionToken',
+      },
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<void> registerPushToken(String sessionToken, String token) async {
+    final url = Uri.parse('$baseUrl/api/v1/auth/notifications/register');
+    print('[AuthApiClient] Sending POST request to: $url');
+    final response = await _client.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $sessionToken',
+      },
+      body: jsonEncode({'token': token}),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+  }
 }

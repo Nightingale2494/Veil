@@ -548,7 +548,7 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
         backgroundColor: Colors.deepPurpleAccent,
         foregroundColor: Colors.white,
         child: const Icon(Icons.add),
-        onPressed: () => _showNewChatDialog(context, ref),
+        onPressed: () => _showNewActionSheet(context),
       ),
       body: Column(
         children: [
@@ -679,6 +679,37 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
           ),
         ],
       ),
+    );
+  }
+
+  void _showNewActionSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E2E),
+      builder: (context) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.person_add, color: Colors.deepPurpleAccent),
+                title: const Text('Start 1-to-1 secure chat', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showNewChatDialog(context, ref);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.group_add, color: Colors.deepPurpleAccent),
+                title: const Text('Create group chat', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showNewGroupDialog(context, ref);
+                },
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -832,6 +863,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       orElse: () => widget.conversation,
     );
 
+    final authState = ref.watch(authProvider);
+    String myDeviceId = '';
+    if (authState is AuthSuccess) {
+      myDeviceId = authState.credentials.deviceId;
+    }
+
     _scrollToBottom();
 
     return Scaffold(
@@ -840,13 +877,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(conv.otherUsername),
-            const Text(
-              'Secure ratchet session active',
-              style: TextStyle(fontSize: 11, color: Colors.greenAccent),
+            Text(
+              conv.isGroup ? 'Group Chat (${conv.groupMemberUsernames.length} members)' : 'Secure ratchet session active',
+              style: const TextStyle(fontSize: 11, color: Colors.greenAccent),
             ),
           ],
         ),
         backgroundColor: const Color(0xFF1E1E2E),
+        actions: [
+          if (conv.isGroup)
+            IconButton(
+              icon: const Icon(Icons.group),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => GroupDetailsPage(conversation: conv),
+                  ),
+                );
+              },
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -865,7 +916,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     itemCount: conv.messages.length,
                     itemBuilder: (context, index) {
                       final msg = conv.messages[index];
-                      final isMe = msg.senderDeviceId != conv.otherDeviceId;
+                      final isMe = msg.senderDeviceId == myDeviceId;
+                      final isSystem = msg.senderDeviceId == '00000000-0000-0000-0000-000000000000';
+                      if (isSystem) {
+                        return Center(
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.white10,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              msg.text,
+                              style: const TextStyle(color: Colors.grey, fontSize: 12, fontStyle: FontStyle.italic),
+                            ),
+                          ),
+                        );
+                      }
                       return Align(
                         alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                         child: Container(
@@ -954,6 +1022,9 @@ class ChatConversation {
   final String otherAccountId;
   final String otherDeviceId;
   final List<ChatMessage> messages;
+  final bool isGroup;
+  final List<String> groupMemberUsernames;
+  final List<String> groupMemberDeviceIds;
 
   ChatConversation({
     required this.conversationId,
@@ -961,10 +1032,15 @@ class ChatConversation {
     required this.otherAccountId,
     required this.otherDeviceId,
     required this.messages,
+    this.isGroup = false,
+    this.groupMemberUsernames = const [],
+    this.groupMemberDeviceIds = const [],
   });
 
   ChatConversation copyWith({
     List<ChatMessage>? messages,
+    List<String>? groupMemberUsernames,
+    List<String>? groupMemberDeviceIds,
   }) {
     return ChatConversation(
       conversationId: conversationId,
@@ -972,6 +1048,9 @@ class ChatConversation {
       otherAccountId: otherAccountId,
       otherDeviceId: otherDeviceId,
       messages: messages ?? this.messages,
+      isGroup: isGroup,
+      groupMemberUsernames: groupMemberUsernames ?? this.groupMemberUsernames,
+      groupMemberDeviceIds: groupMemberDeviceIds ?? this.groupMemberDeviceIds,
     );
   }
 }
@@ -1026,6 +1105,104 @@ class ChatNotifier extends StateNotifier<ChatState> {
     _wsClient!.messages.listen((binBytes) {
       _handleIncomingEnvelope(binBytes);
     });
+
+    // Register push token immediately (mock gateway)
+    _api.registerPushToken(accessToken, 'mock-fcm-token-$myDeviceId').catchError((e) {
+      debugPrint('[ChatNotifier] Register push token failed: $e');
+    });
+
+    // Load groups
+    loadGroups(accessToken);
+  }
+
+  Future<void> loadGroups(String accessToken) async {
+    try {
+      final res = await _api.getGroups(accessToken);
+      final List<dynamic> groupList = res['groups'] ?? [];
+      final List<ChatConversation> loadedGroups = [];
+      for (final g in groupList) {
+        final id = g['id'] as String;
+        final name = g['name'] as String;
+        final members = g['members'] as List<dynamic>;
+        final List<String> memberNames = [];
+        final List<String> memberDevices = [];
+        
+        for (final m in members) {
+          final username = m['username'] as String;
+          memberNames.add(username);
+          
+          try {
+            final userRes = await _api.lookupUser(username);
+            final devices = userRes['devices'] as List<dynamic>;
+            for (final d in devices) {
+              memberDevices.add(d['device_id'] as String);
+            }
+          } catch (_) {}
+        }
+        
+        loadedGroups.add(ChatConversation(
+          conversationId: id,
+          otherUsername: name,
+          otherAccountId: 'Group Chat',
+          otherDeviceId: '',
+          messages: [],
+          isGroup: true,
+          groupMemberUsernames: memberNames,
+          groupMemberDeviceIds: memberDevices,
+        ));
+      }
+      
+      final updated = List<ChatConversation>.from(state.conversations);
+      for (final g in loadedGroups) {
+        final existingIdx = updated.indexWhere((c) => c.conversationId == g.conversationId);
+        if (existingIdx != -1) {
+          final oldConv = updated[existingIdx];
+          updated[existingIdx] = g.copyWith(messages: oldConv.messages);
+        } else {
+          updated.add(g);
+        }
+      }
+      state = state.copyWith(conversations: updated);
+    } catch (e) {
+      debugPrint('[ChatNotifier] Failed to load groups: $e');
+    }
+  }
+
+  Future<void> createGroupChat(String accessToken, String name) async {
+    try {
+      final result = await _api.createGroup(accessToken, name);
+      final newGroupId = result['id'] as String;
+      debugPrint('[ChatNotifier] Group created: $newGroupId');
+      await loadGroups(accessToken);
+    } catch (e) {
+      debugPrint('[ChatNotifier] Group creation failed: $e');
+      state = state.copyWith(error: e.toString());
+      rethrow;
+    }
+  }
+
+  Future<void> inviteToGroup(String accessToken, String groupId, String username) async {
+    try {
+      await _api.inviteMember(accessToken, groupId, username);
+      debugPrint('[ChatNotifier] Invited user $username to group $groupId');
+      await loadGroups(accessToken);
+    } catch (e) {
+      debugPrint('[ChatNotifier] Invite to group failed: $e');
+      state = state.copyWith(error: e.toString());
+      rethrow;
+    }
+  }
+
+  Future<void> removeFromGroup(String accessToken, String groupId, String userId) async {
+    try {
+      await _api.removeMember(accessToken, groupId, userId);
+      debugPrint('[ChatNotifier] Removed user $userId from group $groupId');
+      await loadGroups(accessToken);
+    } catch (e) {
+      debugPrint('[ChatNotifier] Remove member failed: $e');
+      state = state.copyWith(error: e.toString());
+      rethrow;
+    }
   }
 
   void _handleIncomingEnvelope(Uint8List binBytes) {
@@ -1051,7 +1228,6 @@ class ChatNotifier extends StateNotifier<ChatState> {
           timestamp: DateTime.now(),
         );
 
-        // Find conversation
         final index = state.conversations.indexWhere((c) => c.conversationId == conversationId);
         if (index != -1) {
           final conv = state.conversations[index];
@@ -1060,10 +1236,11 @@ class ChatNotifier extends StateNotifier<ChatState> {
           updatedConversations[index] = conv.copyWith(messages: updatedMessages);
           state = state.copyWith(conversations: updatedConversations);
         } else {
-          // Dynamic conversation creation if not found (message from new contact/device)
           final newConv = ChatConversation(
             conversationId: conversationId,
-            otherUsername: 'Device: ' + senderDeviceId.substring(0, 8),
+            otherUsername: senderDeviceId == '00000000-0000-0000-0000-000000000000'
+                ? 'System Alert'
+                : 'Device: ' + senderDeviceId.substring(0, 8),
             otherAccountId: 'Unknown',
             otherDeviceId: senderDeviceId,
             messages: [newMessage],
@@ -1092,11 +1269,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
         throw Exception('User has no active approved devices.');
       }
 
-      // Address message to the first approved device
       final firstDevice = devices.first as Map<String, dynamic>;
       final otherDeviceId = firstDevice['device_id'] as String;
 
-      // Unique conversation ID derived from user IDs
       final conversationId = const Uuid().v4();
 
       final newConv = ChatConversation(
@@ -1107,7 +1282,6 @@ class ChatNotifier extends StateNotifier<ChatState> {
         messages: [],
       );
 
-      // Add to conversations list if not already present
       final exists = state.conversations.any((c) => c.otherDeviceId == otherDeviceId);
       if (!exists) {
         state = state.copyWith(conversations: [...state.conversations, newConv]);
@@ -1131,34 +1305,58 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final conv = state.conversations[index];
     final messageId = const Uuid().v4();
 
-    // Build CBOR envelope
-    final msgIdBytes = Uuid.parse(messageId);
-    final convIdBytes = Uuid.parse(conversationId);
-    final senderDeviceBytes = Uuid.parse(_myDeviceId!);
-    final recipientDeviceBytes = Uuid.parse(conv.otherDeviceId);
-    final ciphertextBytes = Uint8List.fromList(utf8.encode(text));
+    if (conv.isGroup) {
+      for (final deviceId in conv.groupMemberDeviceIds) {
+        if (deviceId == _myDeviceId) continue;
+        
+        final msgIdBytes = Uuid.parse(messageId);
+        final convIdBytes = Uuid.parse(conversationId);
+        final senderDeviceBytes = Uuid.parse(_myDeviceId!);
+        final recipientDeviceBytes = Uuid.parse(deviceId);
+        final ciphertextBytes = Uint8List.fromList(utf8.encode(text));
 
-    final map = {
-      'message_id': CborBytes(msgIdBytes),
-      'conversation_id': CborBytes(convIdBytes),
-      'sender_device_id': CborBytes(senderDeviceBytes),
-      'recipient_device_id': CborBytes(recipientDeviceBytes),
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-      'dh_pub': CborBytes(Uint8List(32)), // dummy DH
-      'ciphertext': CborBytes(ciphertextBytes),
-      'signature': CborBytes(Uint8List(64)), // dummy signature
-      'major_version': 1,
-      'minor_version': 0,
-      'message_number': conv.messages.length + 1,
-    };
+        final map = {
+          'message_id': CborBytes(msgIdBytes),
+          'conversation_id': CborBytes(convIdBytes),
+          'sender_device_id': CborBytes(senderDeviceBytes),
+          'recipient_device_id': CborBytes(recipientDeviceBytes),
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'dh_pub': CborBytes(Uint8List(32)),
+          'ciphertext': CborBytes(ciphertextBytes),
+          'signature': CborBytes(Uint8List(64)),
+          'major_version': 1,
+          'minor_version': 0,
+          'message_number': conv.messages.length + 1,
+        };
 
-    final binBytes = cbor.encode(CborValue(map));
-    
-    // Transmit envelope
-    _wsClient!.sendEnvelope(Uint8List.fromList(binBytes));
-    debugPrint('[ChatNotifier] Sent message envelope over WS: "$text"');
+        final binBytes = cbor.encode(CborValue(map));
+        _wsClient!.sendEnvelope(Uint8List.fromList(binBytes));
+      }
+    } else {
+      final msgIdBytes = Uuid.parse(messageId);
+      final convIdBytes = Uuid.parse(conversationId);
+      final senderDeviceBytes = Uuid.parse(_myDeviceId!);
+      final recipientDeviceBytes = Uuid.parse(conv.otherDeviceId);
+      final ciphertextBytes = Uint8List.fromList(utf8.encode(text));
 
-    // Add locally to the state
+      final map = {
+        'message_id': CborBytes(msgIdBytes),
+        'conversation_id': CborBytes(convIdBytes),
+        'sender_device_id': CborBytes(senderDeviceBytes),
+        'recipient_device_id': CborBytes(recipientDeviceBytes),
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'dh_pub': CborBytes(Uint8List(32)),
+        'ciphertext': CborBytes(ciphertextBytes),
+        'signature': CborBytes(Uint8List(64)),
+        'major_version': 1,
+        'minor_version': 0,
+        'message_number': conv.messages.length + 1,
+      };
+
+      final binBytes = cbor.encode(CborValue(map));
+      _wsClient!.sendEnvelope(Uint8List.fromList(binBytes));
+    }
+
     final localMessage = ChatMessage(
       messageId: messageId,
       senderDeviceId: _myDeviceId!,
@@ -1183,3 +1381,249 @@ final chatProvider = StateNotifierProvider<ChatNotifier, ChatState>((ref) {
   final api = ref.watch(authApiClientProvider);
   return ChatNotifier(api: api);
 });
+
+void _showNewGroupDialog(BuildContext context, WidgetRef ref) {
+  final controller = TextEditingController();
+  String? error;
+  bool loading = false;
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1E1E2E),
+            title: const Text('Create New Group Chat'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (error != null) ...[
+                  Text(error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+                  const SizedBox(height: 8),
+                ],
+                TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    hintText: 'Type group name...',
+                    labelText: 'Group Name',
+                    prefixIcon: Icon(Icons.group),
+                  ),
+                ),
+                if (loading) ...[
+                  const SizedBox(height: 16),
+                  const CircularProgressIndicator(color: Colors.deepPurpleAccent),
+                ],
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurpleAccent),
+                onPressed: loading ? null : () async {
+                  final name = controller.text.trim();
+                  if (name.isEmpty) return;
+                  
+                  setState(() {
+                    loading = true;
+                    error = null;
+                  });
+
+                  try {
+                    final authState = ref.read(authProvider);
+                    if (authState is AuthSuccess) {
+                      await ref.read(chatProvider.notifier).createGroupChat(authState.session.accessToken, name);
+                      if (context.mounted) {
+                        Navigator.pop(context);
+                      }
+                    } else {
+                      throw Exception('Not authenticated.');
+                    }
+                  } catch (e) {
+                    setState(() {
+                      loading = false;
+                      error = e.toString().replaceAll('Exception: ', '');
+                    });
+                  }
+                },
+                child: const Text('Create'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+class GroupDetailsPage extends ConsumerStatefulWidget {
+  final ChatConversation conversation;
+
+  const GroupDetailsPage({super.key, required this.conversation});
+
+  @override
+  ConsumerState<GroupDetailsPage> createState() => _GroupDetailsPageState();
+}
+
+class _GroupDetailsPageState extends ConsumerState<GroupDetailsPage> {
+  final _inviteController = TextEditingController();
+  bool _loading = false;
+  String? _error;
+
+  @override
+  Widget build(BuildContext context) {
+    final authState = ref.watch(authProvider);
+    final chatState = ref.watch(chatProvider);
+    
+    final conv = chatState.conversations.firstWhere(
+      (c) => c.conversationId == widget.conversation.conversationId,
+      orElse: () => widget.conversation,
+    );
+
+    String myUserId = '';
+    String sessionToken = '';
+    if (authState is AuthSuccess) {
+      myUserId = authState.credentials.userId;
+      sessionToken = authState.session.accessToken;
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('${conv.otherUsername} Details'),
+        backgroundColor: const Color(0xFF1E1E2E),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_error != null) ...[
+              Text(_error!, style: const TextStyle(color: Colors.redAccent)),
+              const SizedBox(height: 12),
+            ],
+            const Text(
+              'Invite Member',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _inviteController,
+                    decoration: const InputDecoration(
+                      hintText: 'Username or Account ID...',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurpleAccent),
+                  onPressed: _loading ? null : () async {
+                    final query = _inviteController.text.trim();
+                    if (query.isEmpty) return;
+                    setState(() {
+                      _loading = true;
+                      _error = null;
+                    });
+                    try {
+                      await ref.read(chatProvider.notifier).inviteToGroup(sessionToken, conv.conversationId, query);
+                      _inviteController.clear();
+                      setState(() {
+                        _loading = false;
+                      });
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Member invited successfully!')),
+                      );
+                    } catch (e) {
+                      setState(() {
+                        _loading = false;
+                        _error = e.toString().replaceAll('Exception: ', '');
+                      });
+                    }
+                  },
+                  child: const Text('Invite'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 32),
+            const Text(
+              'Group Members',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+            const SizedBox(height: 12),
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: conv.groupMemberUsernames.length,
+              itemBuilder: (context, index) {
+                final username = conv.groupMemberUsernames[index];
+                return ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: Colors.deepPurpleAccent.withOpacity(0.2),
+                    child: Text(
+                      username.isNotEmpty ? username.substring(0, 1).toUpperCase() : 'U',
+                      style: const TextStyle(color: Colors.purpleAccent),
+                    ),
+                  ),
+                  title: Text(username, style: const TextStyle(color: Colors.white)),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.remove_circle, color: Colors.redAccent),
+                    onPressed: () async {
+                      try {
+                        final userRes = await ref.read(chatProvider.notifier)._api.lookupUser(username);
+                        final targetUserId = userRes['user_id'] as String;
+                        setState(() {
+                          _loading = true;
+                          _error = null;
+                        });
+                        await ref.read(chatProvider.notifier).removeFromGroup(sessionToken, conv.conversationId, targetUserId);
+                        setState(() {
+                          _loading = false;
+                        });
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Member removed successfully!')),
+                        );
+                      } catch (e) {
+                        setState(() {
+                          _loading = false;
+                          _error = e.toString().replaceAll('Exception: ', '');
+                        });
+                      }
+                    },
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 32),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+              onPressed: () async {
+                try {
+                  setState(() {
+                    _loading = true;
+                    _error = null;
+                  });
+                  await ref.read(chatProvider.notifier).removeFromGroup(sessionToken, conv.conversationId, myUserId);
+                  if (context.mounted) {
+                    Navigator.pop(context); // Pop details page
+                    Navigator.pop(context); // Pop chat room page
+                  }
+                } catch (e) {
+                  setState(() {
+                    _loading = false;
+                    _error = e.toString().replaceAll('Exception: ', '');
+                  });
+                }
+              },
+              child: const Text('Leave Group'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
