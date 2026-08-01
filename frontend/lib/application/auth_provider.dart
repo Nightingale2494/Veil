@@ -177,7 +177,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
 // Providers definition
 final authApiClientProvider = Provider<AuthApiClient>((ref) {
-  return AuthApiClient(baseUrl: 'http://localhost:8080');
+  return AuthApiClient(baseUrl: 'http://34.131.80.168:8080');
 });
 
 final authProvider = StateNotifierProvider<AuthNotifier, AuthState>((ref) {
