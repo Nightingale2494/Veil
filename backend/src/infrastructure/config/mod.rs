@@ -9,6 +9,9 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        // Load environment variables from .env file if present
+        dotenvy::dotenv().ok();
+
         let database_url = env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/veil".to_string());
         let server_address =

@@ -2492,6 +2492,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "curve25519-dalek",
+ "dotenvy",
  "ed25519-dalek",
  "futures-util",
  "hex",
