@@ -26,6 +26,7 @@ class AuthApiClient {
     required String verificationFingerprint,
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/auth/register');
+    print('[AuthApiClient] Sending POST request to: $url');
     final response = await _client.post(
       url,
       headers: {'Content-Type': 'application/json'},
@@ -65,6 +66,7 @@ class AuthApiClient {
     required String verificationFingerprint,
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/auth/login');
+    print('[AuthApiClient] Sending POST request to: $url');
     final response = await _client.post(
       url,
       headers: {'Content-Type': 'application/json'},
@@ -93,6 +95,7 @@ class AuthApiClient {
 
   Future<UserSession> refresh(String refreshToken) async {
     final url = Uri.parse('$baseUrl/api/v1/auth/refresh');
+    print('[AuthApiClient] Sending POST request to: $url');
     final response = await _client.post(
       url,
       headers: {'Content-Type': 'application/json'},
@@ -113,6 +116,7 @@ class AuthApiClient {
     required String newPassword,
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/auth/recover');
+    print('[AuthApiClient] Sending POST request to: $url');
     final response = await _client.post(
       url,
       headers: {'Content-Type': 'application/json'},
@@ -130,6 +134,7 @@ class AuthApiClient {
 
   Future<void> logout(String refreshToken) async {
     final url = Uri.parse('$baseUrl/api/v1/auth/logout');
+    print('[AuthApiClient] Sending POST request to: $url');
     final response = await _client.post(
       url,
       headers: {'Content-Type': 'application/json'},
