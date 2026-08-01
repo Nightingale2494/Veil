@@ -69,9 +69,9 @@ impl User {
     /// Enforces the password validation policy (length check, supports Unicode)
     pub fn validate_password_policy(password: &str) -> Result<(), Error> {
         let len = password.chars().count();
-        if len < 12 {
+        if len < 8 {
             return Err(Error::ValidationError(
-                "Password must be at least 12 characters long.".to_string(),
+                "Password must be at least 8 characters long.".to_string(),
             ));
         }
         if len > 128 {
