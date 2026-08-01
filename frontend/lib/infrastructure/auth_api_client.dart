@@ -145,4 +145,19 @@ class AuthApiClient {
       throw Exception(response.body);
     }
   }
+
+  Future<Map<String, dynamic>> lookupUser(String usernameOrId) async {
+    final url = Uri.parse('$baseUrl/api/v1/auth/users/lookup/$usernameOrId');
+    print('[AuthApiClient] Sending GET request to: $url');
+    final response = await _client.get(
+      url,
+      headers: {'Content-Type': 'application/json'},
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
 }

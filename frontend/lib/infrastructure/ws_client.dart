@@ -79,7 +79,7 @@ class VeilWebSocketClient {
       }
 
       // Send Ping frame
-      _socket!.addString('ping');
+      _socket!.add('ping');
     });
   }
 

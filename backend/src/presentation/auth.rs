@@ -64,6 +64,7 @@ pub fn auth_router(state: Arc<AppState>) -> Router {
         .route("/prekeys/upload", post(upload_prekeys_handler))
         .route("/prekeys/download/:device_id", get(download_prekeys_handler))
         .route("/test/cleanup", post(test_cleanup_handler))
+        .route("/users/lookup/:username_or_id", get(lookup_user_handler))
         .with_state(state)
 }
 
@@ -321,4 +322,63 @@ async fn test_cleanup_handler(
     }
 
     Ok(StatusCode::OK)
+}
+
+#[derive(serde::Serialize)]
+pub struct UserSearchResponse {
+    pub user_id: Uuid,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub devices: Vec<DeviceResponse>,
+}
+
+#[derive(serde::Serialize)]
+pub struct DeviceResponse {
+    pub device_id: Uuid,
+    pub device_name: String,
+    pub device_public_key: Vec<u8>,
+}
+
+async fn lookup_user_handler(
+    State(state): State<Arc<AppState>>,
+    Path(username_or_id): Path<String>,
+) -> Result<Json<UserSearchResponse>, (StatusCode, String)> {
+    let mut user_opt = state
+        .user_repo
+        .get_user_by_username(&username_or_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if user_opt.is_none() {
+        user_opt = state
+            .user_repo
+            .get_user_by_account_id(&username_or_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let user = user_opt.ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let devices = state
+        .device_repo
+        .get_devices_by_user_id(&user.id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let device_responses = devices
+        .into_iter()
+        .filter(|d| d.deleted_at.is_none() && d.approval_status == crate::domain::device::DeviceApprovalStatus::Approved)
+        .map(|d| DeviceResponse {
+            device_id: d.id,
+            device_name: d.device_name,
+            device_public_key: d.device_public_key,
+        })
+        .collect();
+
+    Ok(Json(UserSearchResponse {
+        user_id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        devices: device_responses,
+    }))
 }
