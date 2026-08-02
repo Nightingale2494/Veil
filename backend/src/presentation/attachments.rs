@@ -134,6 +134,7 @@ async fn initiate_upload(
     })?;
 
     let blob_id = Uuid::new_v4();
+    tracing::info!("[AttachmentPipeline] upload transaction initiated: blob_id={}, conversation_id={}, fileSize={}", blob_id, payload.conversation_id, payload.file_size);
 
     let blob = AttachmentBlob {
         id: blob_id,
@@ -367,6 +368,8 @@ async fn bind_blob(
             "Only the uploader can bind attachment to message".to_string(),
         ));
     }
+
+    tracing::info!("[AttachmentPipeline] attachment bind step: blob_id={}, message_id={}", payload.blob_id, payload.message_id);
 
     state
         .attachment_repo

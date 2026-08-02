@@ -40,7 +40,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Database & Repositories State
     let state = match DatabaseConnection::connect(&config.database_url).await {
         Ok(db) => {
-            info!("Database connected successfully. Initializing PostgreSQL adapters.");
+            info!("Database connected successfully. Running DB patches...");
+            // Dynamically drop constraint if it exists
+            let _ = sqlx::query("ALTER TABLE attachment_blobs DROP CONSTRAINT IF EXISTS attachment_blobs_message_id_fkey")
+                .execute(&db.pool)
+                .await;
+            let _ = sqlx::query("ALTER TABLE attachment_blobs DROP CONSTRAINT IF EXISTS attachment_blobs_msg_id_fkey")
+                .execute(&db.pool)
+                .await;
+            info!("Initializing PostgreSQL adapters.");
             let pg_repo = Arc::new(PostgresRepository::new(db.pool.clone()));
             AppState {
                 user_repo: pg_repo.clone() as Arc<dyn UserRepository>,

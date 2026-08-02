@@ -2568,6 +2568,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final int chunkCount = totalSize == 0 ? 1 : (totalSize / chunkSize).ceil();
 
     final messageId = const Uuid().v4();
+    debugPrint('[AttachmentPipeline] generated message_id: $messageId');
 
     onProgress?.call(0.1);
     debugPrint('[AttachmentPipeline] upload initiated: conversationId=$conversationId fileSize=$totalSize chunkCount=$chunkCount');
@@ -2579,6 +2580,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
       mimeType: mimeType,
       chunkCount: chunkCount,
     );
+    debugPrint('[AttachmentPipeline] upload transaction: blob_id=$blobId, size=$totalSize');
     debugPrint('[AttachmentPipeline] upload response received: blobId=$blobId');
 
     for (int i = 0; i < chunkCount; i++) {
@@ -2600,6 +2602,8 @@ class ChatNotifier extends StateNotifier<ChatState> {
     }
     debugPrint('[AttachmentPipeline] upload finalized: blobId=$blobId');
 
+    debugPrint('[AttachmentPipeline] attachment message_id: $messageId');
+    debugPrint('[AttachmentPipeline] attachment bind step: blob_id=$blobId, message_id=$messageId');
     debugPrint('[AttachmentPipeline] attachment binding starting: blobId=$blobId messageId=$messageId');
     await _api.bindAttachment(
       sessionToken: sessionToken,
@@ -2697,6 +2701,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     updatedConversations[index] = conv.copyWith(messages: updatedMessages);
     state = state.copyWith(conversations: updatedConversations);
     onProgress?.call(1.0);
+    debugPrint('[AttachmentPipeline] inserted message_id: $messageId');
     debugPrint('[AttachmentPipeline] message sent: messageId=$messageId');
   }
 
