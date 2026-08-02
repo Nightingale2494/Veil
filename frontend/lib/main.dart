@@ -2563,9 +2563,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
     final int totalSize = fileBytes.length;
     
-    // Use 128KB chunks for demo/upload speed
-    final int chunkSize = 128 * 1024;
-    final int chunkCount = (totalSize / chunkSize).ceil();
+    // Use 4 MiB chunks as required by the backend uploader protocol
+    final int chunkSize = 4 * 1024 * 1024;
+    final int chunkCount = totalSize == 0 ? 1 : (totalSize / chunkSize).ceil();
 
     final messageId = const Uuid().v4();
 
