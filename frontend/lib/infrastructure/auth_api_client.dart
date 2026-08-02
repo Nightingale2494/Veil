@@ -292,14 +292,15 @@ class AuthApiClient {
   }) async {
     final url = Uri.parse('$baseUrl/api/v1/attachments/upload/$blobId/chunk/$chunkIndex');
     print('[AuthApiClient] Sending POST binary request to: $url');
-    final response = await _client.post(
-      url,
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Authorization': 'Bearer $sessionToken',
-      },
-      body: chunkBytes,
-    );
+    
+    final request = http.Request('POST', url);
+    request.headers['Authorization'] = 'Bearer $sessionToken';
+    request.headers['Content-Type'] = 'application/octet-stream';
+    request.bodyBytes = chunkBytes;
+
+    final streamedResponse = await _client.send(request);
+    final response = await http.Response.fromStream(streamedResponse);
+
     if (response.statusCode != 200) {
       throw Exception(response.body);
     }
