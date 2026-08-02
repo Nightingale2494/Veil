@@ -837,7 +837,7 @@ impl AttachmentRepository for PostgresRepository {
 
     async fn bind_blob_to_message(&self, id: &Uuid, message_id: &Uuid) -> Result<(), Error> {
         sqlx::query(
-            "UPDATE attachment_blobs SET message_id = $1, updated_at = NOW() WHERE id = $2",
+            "UPDATE attachment_blobs SET message_id = (SELECT id FROM pending_messages WHERE client_message_id = $1 LIMIT 1), updated_at = NOW() WHERE id = $2",
         )
         .bind(message_id)
         .bind(id)

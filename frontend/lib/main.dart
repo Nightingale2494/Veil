@@ -2602,16 +2602,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     }
     debugPrint('[AttachmentPipeline] upload finalized: blobId=$blobId');
 
-    debugPrint('[AttachmentPipeline] attachment message_id: $messageId');
-    debugPrint('[AttachmentPipeline] attachment bind step: blob_id=$blobId, message_id=$messageId');
-    debugPrint('[AttachmentPipeline] attachment binding starting: blobId=$blobId messageId=$messageId');
-    await _api.bindAttachment(
-      sessionToken: sessionToken,
-      blobId: blobId,
-      messageId: messageId,
-    );
-    debugPrint('[AttachmentPipeline] attachment bound: blobId=$blobId');
-    onProgress?.call(0.95);
+    onProgress?.call(0.90);
 
     final payloadJson = jsonEncode({
       'type': type,
@@ -2676,6 +2667,25 @@ class ChatNotifier extends StateNotifier<ChatState> {
       final binBytes = cbor.encode(CborValue(map));
       _wsClient!.sendEnvelope(Uint8List.fromList(binBytes));
     }
+
+    // Wait a brief period (e.g. 200ms) to allow the server's asynchronous task to queue
+    // the messages in `pending_messages` before we bind the attachment.
+    await Future.delayed(const Duration(milliseconds: 200));
+
+    debugPrint('[AttachmentPipeline] attachment message_id: $messageId');
+    debugPrint('[AttachmentPipeline] attachment bind step: blob_id=$blobId, message_id=$messageId');
+    debugPrint('[AttachmentPipeline] attachment binding starting: blobId=$blobId messageId=$messageId');
+    try {
+      await _api.bindAttachment(
+        sessionToken: sessionToken,
+        blobId: blobId,
+        messageId: messageId,
+      );
+      debugPrint('[AttachmentPipeline] attachment bound: blobId=$blobId');
+    } catch (e) {
+      debugPrint('[AttachmentPipeline] bindAttachment warning/info: $e');
+    }
+    onProgress?.call(0.95);
 
     final localMessage = ChatMessage(
       messageId: messageId,
