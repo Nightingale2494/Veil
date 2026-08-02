@@ -3,11 +3,21 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cbor/cbor.dart';
 import 'package:uuid/uuid.dart';
+
+import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'application/auth_provider.dart';
 import 'infrastructure/bip39.dart';
@@ -43,7 +53,12 @@ class VeilApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const AuthRouter(),
+      home: Stack(
+        children: [
+          const AuthRouter(),
+          const CallOverlayWrapper(),
+        ],
+      ),
     );
   }
 }
@@ -847,43 +862,248 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   double? _uploadProgress;
   String? _uploadStatusText;
 
-  // Voice note playback simulation state
-  String? _playingMessageId;
-  int _playingSeconds = 0;
-  Timer? _playTimer;
+  // Real voice message recording variables
+  final _audioRecorder = AudioRecorder();
+  bool _isRecording = false;
+  bool _isRecordPaused = false;
+  bool _isRecordLocked = false;
+  String? _recordFilePath;
+  int _recordDuration = 0;
+  Timer? _recordTimer;
+  Timer? _waveformTimer;
+  List<double> _amplitudeHistory = [];
+
+  // Real voice playback variables (Single shared player)
+  late AudioPlayer _voicePlayer;
+  String? _playingVoiceMsgId;
+  bool _isVoicePlaying = false;
+  Duration _voicePosition = Duration.zero;
+  Duration _voiceDuration = Duration.zero;
+  double _playbackSpeed = 1.0;
+  
+  StreamSubscription? _posSub;
+  StreamSubscription? _durSub;
+  StreamSubscription? _stateSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _voicePlayer = AudioPlayer();
+    _posSub = _voicePlayer.onPositionChanged.listen((pos) {
+      setState(() {
+        _voicePosition = pos;
+      });
+    });
+    _durSub = _voicePlayer.onDurationChanged.listen((dur) {
+      setState(() {
+        _voiceDuration = dur;
+      });
+    });
+    _stateSub = _voicePlayer.onPlayerStateChanged.listen((pState) {
+      setState(() {
+        _isVoicePlaying = pState == PlayerState.playing;
+      });
+    });
+  }
 
   @override
   void dispose() {
-    _playTimer?.cancel();
+    _recordTimer?.cancel();
+    _waveformTimer?.cancel();
+    _posSub?.cancel();
+    _durSub?.cancel();
+    _stateSub?.cancel();
+    _voicePlayer.dispose();
+    _audioRecorder.dispose();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
-  void _startVoiceNoteTimer(String messageId, int maxDuration) {
-    _playTimer?.cancel();
-    setState(() {
-      _playingMessageId = messageId;
-      _playingSeconds = 0;
-    });
+  Future<void> _startRecording() async {
+    try {
+      if (await _audioRecorder.hasPermission()) {
+        final dir = await getTemporaryDirectory();
+        final path = '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+        _recordFilePath = path;
 
-    _playTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_playingSeconds >= maxDuration) {
-        _stopVoiceNoteTimer();
-      } else {
+        await _audioRecorder.start(
+          const RecordConfig(encoder: AudioEncoder.aacLc),
+          path: path,
+        );
+
+        _recordDuration = 0;
+        _amplitudeHistory.clear();
+        _recordTimer?.cancel();
+        _recordTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+          setState(() {
+            _recordDuration++;
+          });
+        });
+
+        _waveformTimer?.cancel();
+        _waveformTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) async {
+          final amp = await _audioRecorder.getAmplitude();
+          setState(() {
+            double level = (amp.current + 160) / 160;
+            if (level < 0) level = 0.05;
+            if (level > 1) level = 1.0;
+            _amplitudeHistory.add(level);
+            if (_amplitudeHistory.length > 40) {
+              _amplitudeHistory.removeAt(0);
+            }
+          });
+        });
+
         setState(() {
-          _playingSeconds += 1;
+          _isRecording = true;
+          _isRecordPaused = false;
+          _isRecordLocked = false;
         });
       }
+    } catch (e) {
+      debugPrint('[VoiceRecorder] Error starting record: $e');
+    }
+  }
+
+  Future<void> _pauseRecording() async {
+    await _audioRecorder.pause();
+    _recordTimer?.cancel();
+    _waveformTimer?.cancel();
+    setState(() {
+      _isRecordPaused = true;
     });
   }
 
-  void _stopVoiceNoteTimer() {
-    _playTimer?.cancel();
-    setState(() {
-      _playingMessageId = null;
-      _playingSeconds = 0;
+  Future<void> _resumeRecording() async {
+    await _audioRecorder.resume();
+    _recordTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      setState(() {
+        _recordDuration++;
+      });
     });
+    _waveformTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) async {
+      final amp = await _audioRecorder.getAmplitude();
+      setState(() {
+        double level = (amp.current + 160) / 160;
+        if (level < 0) level = 0.05;
+        if (level > 1) level = 1.0;
+        _amplitudeHistory.add(level);
+        if (_amplitudeHistory.length > 40) {
+          _amplitudeHistory.removeAt(0);
+        }
+      });
+    });
+    setState(() {
+      _isRecordPaused = false;
+    });
+  }
+
+  Future<void> _stopAndSendRecording() async {
+    _recordTimer?.cancel();
+    _waveformTimer?.cancel();
+    final path = await _audioRecorder.stop();
+    setState(() {
+      _isRecording = false;
+      _isRecordLocked = false;
+      _isRecordPaused = false;
+    });
+
+    if (path != null && _recordDuration > 0) {
+      try {
+        final file = File(path);
+        final bytes = await file.readAsBytes();
+
+        setState(() {
+          _uploadProgress = 0.0;
+          _uploadStatusText = 'Encrypting & uploading voice note...';
+        });
+
+        final authState = ref.read(authProvider);
+        if (authState is! AuthSuccess) return;
+        final sessionToken = authState.session.accessToken;
+
+        await ref.read(chatProvider.notifier).sendMediaMessage(
+          sessionToken: sessionToken,
+          conversationId: widget.conversation.conversationId,
+          type: 'voice',
+          filename: 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
+          mimeType: 'audio/m4a',
+          fileBytes: bytes,
+          durationSeconds: _recordDuration,
+          onProgress: (progress) {
+            setState(() {
+              _uploadProgress = progress;
+              _uploadStatusText = 'Uploading voice note (${(progress * 100).toInt()}%)...';
+            });
+          },
+        );
+      } catch (e) {
+        debugPrint('[VoiceRecorder] Error sending voice note: $e');
+      } finally {
+        setState(() {
+          _uploadProgress = null;
+          _uploadStatusText = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _cancelRecording() async {
+    _recordTimer?.cancel();
+    _waveformTimer?.cancel();
+    await _audioRecorder.stop();
+    setState(() {
+      _isRecording = false;
+      _isRecordLocked = false;
+      _isRecordPaused = false;
+    });
+    if (_recordFilePath != null) {
+      try {
+        final file = File(_recordFilePath!);
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (_) {}
+    }
+  }
+
+  void _toggleVoicePlayback(ChatMessage msg) async {
+    if (_playingVoiceMsgId == msg.messageId) {
+      if (_isVoicePlaying) {
+        await _voicePlayer.pause();
+      } else {
+        await _voicePlayer.resume();
+      }
+    } else {
+      await _voicePlayer.stop();
+      setState(() {
+        _playingVoiceMsgId = msg.messageId;
+        _voicePosition = Duration.zero;
+        _voiceDuration = Duration.zero;
+      });
+      if (msg.decryptedData != null) {
+        await _voicePlayer.setPlaybackRate(_playbackSpeed);
+        await _voicePlayer.play(BytesSource(msg.decryptedData!));
+      }
+    }
+  }
+
+  void _cyclePlaybackSpeed() async {
+    double nextSpeed = 1.0;
+    if (_playbackSpeed == 1.0) {
+      nextSpeed = 1.5;
+    } else if (_playbackSpeed == 1.5) {
+      nextSpeed = 2.0;
+    } else {
+      nextSpeed = 1.0;
+    }
+    setState(() {
+      _playbackSpeed = nextSpeed;
+    });
+    if (_isVoicePlaying) {
+      await _voicePlayer.setPlaybackRate(nextSpeed);
+    }
   }
 
   void _scrollToBottom() {
@@ -904,19 +1124,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.memory(
-                msg.decryptedData!,
-                width: 220,
-                height: 180,
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => Container(
+            GestureDetector(
+              onTap: () => _openImageFullScreen(msg),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.memory(
+                  msg.decryptedData!,
                   width: 220,
                   height: 180,
-                  color: Colors.white12,
-                  child: const Center(
-                    child: Icon(Icons.broken_image, color: Colors.white60, size: 40),
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => Container(
+                    width: 220,
+                    height: 180,
+                    color: Colors.white12,
+                    child: const Center(
+                      child: Icon(Icons.broken_image, color: Colors.white60, size: 40),
+                    ),
                   ),
                 ),
               ),
@@ -995,36 +1218,39 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       }
     } else if (msg.type == 'file') {
       if (msg.decryptedData != null) {
-        return Container(
-          width: 220,
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: Colors.green.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.green.withOpacity(0.3)),
-          ),
-          child: Row(
-            children: [
-              const Icon(Icons.file_present, color: Colors.greenAccent, size: 32),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      msg.filename ?? 'document.pdf',
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    Text(
-                      'Decrypted & Saved • ${(msg.fileSize ?? 0) ~/ 1024} KB',
-                      style: const TextStyle(fontSize: 10, color: Colors.white60),
-                    ),
-                  ],
+        return InkWell(
+          onTap: () => _openFile(msg),
+          child: Container(
+            width: 220,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.green.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.green.withOpacity(0.3)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.file_present, color: Colors.greenAccent, size: 32),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        msg.filename ?? 'document.pdf',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        'Tap to Open • ${(msg.fileSize ?? 0) ~/ 1024} KB',
+                        style: const TextStyle(fontSize: 10, color: Colors.white60),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         );
       } else if (msg.isDownloading) {
@@ -1089,9 +1315,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         );
       }
     } else if (msg.type == 'voice') {
-      final isPlaying = _playingMessageId == msg.messageId;
-      final currentPos = isPlaying ? _playingSeconds : 0;
-      final duration = msg.durationSeconds ?? 5;
+      final isPlaying = _playingVoiceMsgId == msg.messageId;
+      final currentPos = isPlaying ? _voicePosition.inSeconds : 0;
+      final duration = msg.durationSeconds ?? (isPlaying && _voiceDuration.inSeconds > 0 ? _voiceDuration.inSeconds : 5);
       
       if (msg.isDownloading) {
         return const SizedBox(
@@ -1113,7 +1339,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       }
       
       return Container(
-        width: 230,
+        width: 250,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
           color: Colors.white.withOpacity(0.06),
@@ -1123,7 +1349,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           children: [
             IconButton(
               icon: Icon(
-                isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                (isPlaying && _isVoicePlaying) ? Icons.pause_circle_filled : Icons.play_circle_filled,
                 color: Colors.purpleAccent,
                 size: 32,
               ),
@@ -1138,11 +1364,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     blobId: msg.blobId!,
                   );
                 } else {
-                  if (isPlaying) {
-                    _stopVoiceNoteTimer();
-                  } else {
-                    _startVoiceNoteTimer(msg.messageId, duration);
-                  }
+                  _toggleVoicePlayback(msg);
                 }
               },
             ),
@@ -1161,14 +1383,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                       thumbColor: Colors.purpleAccent,
                     ),
                     child: Slider(
-                      value: currentPos.toDouble(),
+                      value: currentPos.toDouble().clamp(0.0, duration.toDouble()),
                       min: 0,
                       max: duration.toDouble(),
                       onChanged: (val) {
                         if (isPlaying && msg.decryptedData != null) {
-                          setState(() {
-                            _playingSeconds = val.toInt();
-                          });
+                          _voicePlayer.seek(Duration(seconds: val.toInt()));
                         }
                       },
                     ),
@@ -1182,9 +1402,31 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                           '0:${currentPos.toString().padLeft(2, '0')}',
                           style: const TextStyle(fontSize: 9, color: Colors.white60),
                         ),
-                        Text(
-                          '0:${duration.toString().padLeft(2, '0')}',
-                          style: const TextStyle(fontSize: 9, color: Colors.white60),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (isPlaying) ...[
+                              GestureDetector(
+                                onTap: _cyclePlaybackSpeed,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white12,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    '${_playbackSpeed}x',
+                                    style: const TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Colors.purpleAccent),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                            ],
+                            Text(
+                              '0:${duration.toString().padLeft(2, '0')}',
+                              style: const TextStyle(fontSize: 9, color: Colors.white60),
+                            ),
+                          ],
                         ),
                       ],
                     ),
@@ -1198,6 +1440,66 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
     
     return Text(msg.text, style: const TextStyle(color: Colors.white));
+  }
+
+  Future<void> _openFile(ChatMessage msg) async {
+    if (msg.decryptedData == null) return;
+    try {
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/${msg.filename ?? 'document.pdf'}';
+      final file = File(path);
+      await file.writeAsBytes(msg.decryptedData!);
+      await OpenFilex.open(path);
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open file: $e')),
+      );
+    }
+  }
+
+  void _openImageFullScreen(ChatMessage msg) {
+    if (msg.decryptedData == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.download, color: Colors.white),
+                onPressed: () async {
+                  try {
+                    final dir = await getExternalStorageDirectory() ?? await getApplicationDocumentsDirectory();
+                    final path = '${dir.path}/${msg.filename ?? 'image.png'}';
+                    final file = File(path);
+                    await file.writeAsBytes(msg.decryptedData!);
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Saved to: $path')),
+                      );
+                    }
+                  } catch (e) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Failed to save image: $e')),
+                    );
+                  }
+                },
+              ),
+            ],
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              clipBehavior: Clip.none,
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: Image.memory(msg.decryptedData!),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   void _showAttachmentMenu() {
@@ -1234,11 +1536,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                   backgroundColor: Colors.purple,
                   child: Icon(Icons.image, color: Colors.white),
                 ),
-                title: const Text('Share Encrypted Photo'),
-                subtitle: const Text('Simulate securely picking and sending an image', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                title: const Text('Share Photo from Gallery'),
+                subtitle: const Text('Pick a secure image using native library', style: TextStyle(fontSize: 11, color: Colors.white54)),
                 onTap: () {
                   Navigator.pop(context);
-                  _sendMockImage();
+                  _pickAndSendImage(ImageSource.gallery);
+                },
+              ),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Colors.teal,
+                  child: Icon(Icons.camera_alt, color: Colors.white),
+                ),
+                title: const Text('Take Secure Photo'),
+                subtitle: const Text('Launch native hardware camera safely', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickAndSendImage(ImageSource.camera);
                 },
               ),
               ListTile(
@@ -1247,10 +1561,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                   child: Icon(Icons.insert_drive_file, color: Colors.white),
                 ),
                 title: const Text('Share Encrypted Document'),
-                subtitle: const Text('Simulate securely picking and sending a file', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                subtitle: const Text('Select ZIP, PDF, or APK using native explorer', style: TextStyle(fontSize: 11, color: Colors.white54)),
                 onTap: () {
                   Navigator.pop(context);
-                  _sendMockDocument();
+                  _pickAndSendFile();
                 },
               ),
               ListTile(
@@ -1259,10 +1573,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                   child: Icon(Icons.mic, color: Colors.white),
                 ),
                 title: const Text('Record Voice Note'),
-                subtitle: const Text('Simulate audio recorder interface and dispatch', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                subtitle: const Text('Triggers real-time microphone hardware feed', style: TextStyle(fontSize: 11, color: Colors.white54)),
                 onTap: () {
                   Navigator.pop(context);
-                  _showVoiceRecordSheet();
+                  _startRecording();
                 },
               ),
               const SizedBox(height: 12),
@@ -1273,27 +1587,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     );
   }
 
-  void _sendMockImage() async {
-    final authState = ref.read(authProvider);
-    if (authState is! AuthSuccess) return;
-    final sessionToken = authState.session.accessToken;
-
-    const String base64Png = "iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==";
-    final bytes = base64Decode(base64Png);
-    
-    setState(() {
-      _uploadProgress = 0.0;
-      _uploadStatusText = 'Encrypting & preparing image...';
-    });
-
+  void _pickAndSendImage(ImageSource source) async {
     try {
+      final picker = ImagePicker();
+      final XFile? image = await picker.pickImage(source: source);
+      if (image == null) return;
+
+      final bytes = await image.readAsBytes();
+      final filename = image.name;
+      final mimeType = 'image/png';
+
+      setState(() {
+        _uploadProgress = 0.0;
+        _uploadStatusText = 'Encrypting & preparing image...';
+      });
+
+      final authState = ref.read(authProvider);
+      if (authState is! AuthSuccess) return;
+      final sessionToken = authState.session.accessToken;
+
       await ref.read(chatProvider.notifier).sendMediaMessage(
         sessionToken: sessionToken,
         conversationId: widget.conversation.conversationId,
         type: 'image',
-        filename: 'veil_secure_artwork_${DateTime.now().millisecond}.png',
-        mimeType: 'image/png',
-        fileBytes: Uint8List.fromList(bytes),
+        filename: filename,
+        mimeType: mimeType,
+        fileBytes: bytes,
         onProgress: (progress) {
           setState(() {
             _uploadProgress = progress;
@@ -1303,7 +1622,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $e')),
+        SnackBar(content: Text('Failed to pick/send image: $e')),
       );
     } finally {
       setState(() {
@@ -1313,36 +1632,42 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
   }
 
-  void _sendMockDocument() async {
-    final authState = ref.read(authProvider);
-    if (authState is! AuthSuccess) return;
-    final sessionToken = authState.session.accessToken;
-
-    final bytes = utf8.encode("VEIL SECURE AUDIT REPORT\nCONFIDENTIAL - DO NOT SHARE\nSHA-256 Verified.");
-    
-    setState(() {
-      _uploadProgress = 0.0;
-      _uploadStatusText = 'Encrypting document...';
-    });
-
+  void _pickAndSendFile() async {
     try {
+      final result = await FilePicker.platform.pickFiles();
+      if (result == null || result.files.single.path == null) return;
+
+      final file = result.files.single;
+      final bytes = await File(file.path!).readAsBytes();
+      final filename = file.name;
+      final mimeType = file.extension != null ? 'application/${file.extension}' : 'application/octet-stream';
+
+      setState(() {
+        _uploadProgress = 0.0;
+        _uploadStatusText = 'Encrypting & preparing file...';
+      });
+
+      final authState = ref.read(authProvider);
+      if (authState is! AuthSuccess) return;
+      final sessionToken = authState.session.accessToken;
+
       await ref.read(chatProvider.notifier).sendMediaMessage(
         sessionToken: sessionToken,
         conversationId: widget.conversation.conversationId,
         type: 'file',
-        filename: 'security_audit_report.pdf',
-        mimeType: 'application/pdf',
-        fileBytes: Uint8List.fromList(bytes),
+        filename: filename,
+        mimeType: mimeType,
+        fileBytes: bytes,
         onProgress: (progress) {
           setState(() {
             _uploadProgress = progress;
-            _uploadStatusText = 'Uploading document chunks (${(progress * 100).toInt()}%)...';
+            _uploadStatusText = 'Uploading file chunks (${(progress * 100).toInt()}%)...';
           });
         },
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $e')),
+        SnackBar(content: Text('Failed to pick/send file: $e')),
       );
     } finally {
       setState(() {
@@ -1350,137 +1675,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         _uploadStatusText = null;
       });
     }
-  }
-
-  void _showVoiceRecordSheet() {
-    int duration = 0;
-    Timer? recordTimer;
-    bool isRecording = true;
-    
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            if (recordTimer == null && isRecording) {
-              recordTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-                setModalState(() {
-                  duration += 1;
-                });
-              });
-            }
-            
-            return AlertDialog(
-              backgroundColor: const Color(0xFF1A1029),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              title: const Center(
-                child: Text(
-                  'Recording Encrypted Voice Note',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(height: 16),
-                  Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Container(
-                        width: 70,
-                        height: 70,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.red.withOpacity(0.1 + (duration % 2 == 0 ? 0.2 : 0.05)),
-                        ),
-                      ),
-                      const CircleAvatar(
-                        radius: 28,
-                        backgroundColor: Colors.red,
-                        child: Icon(Icons.mic, color: Colors.white, size: 32),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    '0:${duration.toString().padLeft(2, '0')}',
-                    style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Secure E2E hardware channel bound',
-                    style: TextStyle(fontSize: 10, color: Colors.greenAccent),
-                  ),
-                  const SizedBox(height: 16),
-                ],
-              ),
-              actionsAlignment: MainAxisAlignment.spaceAround,
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    recordTimer?.cancel();
-                    Navigator.pop(context);
-                  },
-                  child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                  ),
-                  onPressed: () async {
-                    recordTimer?.cancel();
-                    Navigator.pop(context);
-                    
-                    if (duration < 1) return;
-                    
-                    final authState = ref.read(authProvider);
-                    if (authState is! AuthSuccess) return;
-                    final sessionToken = authState.session.accessToken;
-
-                    final voiceBytes = utf8.encode("VEIL MOCK AUDIO BITSTREAM: Opus 16kHz audio data.");
-                    
-                    setState(() {
-                      _uploadProgress = 0.0;
-                      _uploadStatusText = 'Encoding voice note...';
-                    });
-
-                    try {
-                      await ref.read(chatProvider.notifier).sendMediaMessage(
-                        sessionToken: sessionToken,
-                        conversationId: widget.conversation.conversationId,
-                        type: 'voice',
-                        filename: 'voice_note_${DateTime.now().millisecond}.opus',
-                        mimeType: 'audio/opus',
-                        fileBytes: Uint8List.fromList(voiceBytes),
-                        durationSeconds: duration,
-                        onProgress: (progress) {
-                          setState(() {
-                            _uploadProgress = progress;
-                            _uploadStatusText = 'Uploading voice note (${(progress * 100).toInt()}%)...';
-                          });
-                        },
-                      );
-                    } catch (e) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Voice note sending failed: $e')),
-                      );
-                    } finally {
-                      setState(() {
-                        _uploadProgress = null;
-                        _uploadStatusText = null;
-                      });
-                    }
-                  },
-                  child: const Text('Stop & Send'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    ).then((_) => recordTimer?.cancel());
   }
 
   @override
@@ -1516,6 +1710,30 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         ),
         backgroundColor: const Color(0xFF1E1E2E),
         actions: [
+          if (!conv.isGroup) ...[
+            IconButton(
+              icon: const Icon(Icons.call, color: Colors.purpleAccent),
+              onPressed: () {
+                ref.read(callStateProvider.notifier).startCall(
+                  conversationId: conv.conversationId,
+                  otherUsername: conv.otherUsername,
+                  otherDeviceId: conv.otherDeviceId,
+                  isVideo: false,
+                );
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.videocam, color: Colors.purpleAccent),
+              onPressed: () {
+                ref.read(callStateProvider.notifier).startCall(
+                  conversationId: conv.conversationId,
+                  otherUsername: conv.otherUsername,
+                  otherDeviceId: conv.otherDeviceId,
+                  isVideo: true,
+                );
+              },
+            ),
+          ],
           if (conv.isGroup)
             IconButton(
               icon: const Icon(Icons.group),
@@ -1623,29 +1841,177 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
               ),
             ),
           Container(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
             color: const Color(0xFF1E1E2E),
             child: Row(
               children: [
-                IconButton(
-                  icon: const Icon(Icons.add, color: Colors.purpleAccent),
-                  onPressed: _showAttachmentMenu,
-                ),
-                Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    decoration: const InputDecoration(
-                      hintText: 'Type a secure message...',
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.symmetric(horizontal: 16),
-                    ),
-                    onSubmitted: (_) => _sendMessage(),
+                if (!_isRecording) ...[
+                  IconButton(
+                    icon: const Icon(Icons.sentiment_satisfied_alt, color: Colors.purpleAccent),
+                    onPressed: () {
+                      final cursorPosition = _messageController.selection.baseOffset;
+                      const emoji = "😊";
+                      if (cursorPosition >= 0) {
+                        final text = _messageController.text;
+                        final newText = text.replaceRange(cursorPosition, cursorPosition, emoji);
+                        _messageController.text = newText;
+                        _messageController.selection = TextSelection.fromPosition(
+                          TextPosition(offset: cursorPosition + emoji.length),
+                        );
+                      } else {
+                        _messageController.text += emoji;
+                      }
+                      setState(() {});
+                    },
                   ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.send, color: Colors.deepPurpleAccent),
-                  onPressed: _sendMessage,
-                ),
+                  IconButton(
+                    icon: const Icon(Icons.attach_file, color: Colors.purpleAccent),
+                    onPressed: _showAttachmentMenu,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.camera_alt, color: Colors.purpleAccent),
+                    onPressed: () => _pickAndSendImage(ImageSource.camera),
+                  ),
+                ],
+                
+                if (_isRecording)
+                  Expanded(
+                    child: Container(
+                      height: 50,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: Row(
+                        children: [
+                          TweenAnimationBuilder<double>(
+                            tween: Tween(begin: 0.2, end: 1.0),
+                            duration: const Duration(milliseconds: 600),
+                            builder: (context, opacity, child) {
+                              return Opacity(
+                                opacity: _isRecordPaused ? 0.5 : opacity,
+                                child: const Icon(Icons.fiber_manual_record, color: Colors.red, size: 16),
+                              );
+                            },
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '0:${_recordDuration.toString().padLeft(2, '0')}',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace'),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: SizedBox(
+                              height: 30,
+                              child: CustomPaint(
+                                painter: VoiceWaveformPainter(
+                                  amplitudeHistory: _amplitudeHistory,
+                                  color: Colors.purpleAccent,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (!_isRecordLocked) ...[
+                            const SizedBox(width: 4),
+                            const Text(
+                              '◀ Swipe left to cancel',
+                              style: TextStyle(fontSize: 9, color: Colors.white54),
+                            ),
+                          ] else ...[
+                            IconButton(
+                              icon: Icon(_isRecordPaused ? Icons.play_arrow : Icons.pause, color: Colors.amberAccent, size: 18),
+                              onPressed: () {
+                                if (_isRecordPaused) {
+                                  _resumeRecording();
+                                } else {
+                                  _pauseRecording();
+                                }
+                              },
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.redAccent, size: 18),
+                              onPressed: _cancelRecording,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0F0F15),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: TextField(
+                        controller: _messageController,
+                        onChanged: (text) {
+                          setState(() {});
+                        },
+                        decoration: const InputDecoration(
+                          hintText: 'Type a secure message...',
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                const SizedBox(width: 6),
+
+                if (_messageController.text.trim().isNotEmpty || (_isRecording && _isRecordLocked))
+                  GestureDetector(
+                    onTap: () {
+                      if (_isRecording) {
+                        _stopAndSendRecording();
+                      } else {
+                        _sendMessage();
+                      }
+                    },
+                    child: const CircleAvatar(
+                      backgroundColor: Colors.deepPurpleAccent,
+                      radius: 22,
+                      child: Icon(Icons.send, color: Colors.white, size: 18),
+                    ),
+                  )
+                else
+                  GestureDetector(
+                    onVerticalDragUpdate: (details) {
+                      if (_isRecording && !_isRecordLocked) {
+                        if (details.localPosition.dy < -60) {
+                          setState(() {
+                            _isRecordLocked = true;
+                          });
+                        }
+                      }
+                    },
+                    onHorizontalDragUpdate: (details) {
+                      if (_isRecording && !_isRecordLocked) {
+                        if (details.localPosition.dx < -60) {
+                          _cancelRecording();
+                        }
+                      }
+                    },
+                    onLongPressStart: (_) => _startRecording(),
+                    onLongPressEnd: (_) {
+                      if (!_isRecordLocked) {
+                        _stopAndSendRecording();
+                      }
+                    },
+                    child: CircleAvatar(
+                      backgroundColor: _isRecording ? Colors.red : const Color(0xFF8A5CFF).withOpacity(0.15),
+                      radius: 22,
+                      child: Icon(
+                        _isRecording ? Icons.mic : Icons.mic_none,
+                        color: _isRecording ? Colors.white : Colors.purpleAccent,
+                        size: 20,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -1796,10 +2162,14 @@ class ChatState {
 
 class ChatNotifier extends StateNotifier<ChatState> {
   final AuthApiClient _api;
+  final Ref ref;
   VeilWebSocketClient? _wsClient;
   String? _myDeviceId;
+
+  VeilWebSocketClient? get wsClient => _wsClient;
+  String? get myDeviceId => _myDeviceId;
   
-  ChatNotifier({required AuthApiClient api})
+  ChatNotifier({required AuthApiClient api, required this.ref})
       : _api = api,
         super(ChatState(conversations: []));
 
@@ -1920,10 +2290,43 @@ class ChatNotifier extends StateNotifier<ChatState> {
     }
   }
 
+  void _handleCallSignal(int signalType, String sdpOrCandidate, String senderDeviceId, String recipientDeviceId, String messageId) {
+    final callNotifier = ref.read(callStateProvider.notifier);
+    if (signalType == 8) {
+      final isVideo = sdpOrCandidate.contains('m=video');
+      callNotifier.receiveOffer(
+        otherDeviceId: senderDeviceId,
+        sdp: sdpOrCandidate,
+        isVideo: isVideo,
+      );
+    } else {
+      callNotifier.handleIncomingSignal(signalType, sdpOrCandidate);
+    }
+  }
+
   void _handleIncomingEnvelope(Uint8List binBytes) {
     try {
       final decoded = cbor.decode(binBytes);
       if (decoded is CborMap) {
+        if (decoded.containsKey(CborString('signal_type'))) {
+          final signalTypeVal = decoded[CborString('signal_type')];
+          final signalType = (signalTypeVal is CborInt) ? signalTypeVal.toInt() : (signalTypeVal as CborSmallInt).value;
+          final sdpOrCandidate = (decoded[CborString('sdp_or_candidate')] as CborString).toString();
+          
+          final senderDeviceBytes = (decoded[CborString('sender_device_id')] as CborBytes).bytes;
+          final senderDeviceId = Uuid.unparse(senderDeviceBytes);
+
+          final recipientDeviceBytes = (decoded[CborString('recipient_device_id')] as CborBytes).bytes;
+          final recipientDeviceId = Uuid.unparse(recipientDeviceBytes);
+          
+          final messageIdBytes = (decoded[CborString('message_id')] as CborBytes).bytes;
+          final messageId = Uuid.unparse(messageIdBytes);
+
+          debugPrint('[ChatNotifier] Received Call Signal: type=$signalType sender=$senderDeviceId');
+          _handleCallSignal(signalType, sdpOrCandidate, senderDeviceId, recipientDeviceId, messageId);
+          return;
+        }
+
         final msgIdBytes = (decoded[CborString('message_id')] as CborBytes).bytes;
         final convIdBytes = (decoded[CborString('conversation_id')] as CborBytes).bytes;
         final senderDeviceBytes = (decoded[CborString('sender_device_id')] as CborBytes).bytes;
@@ -2330,7 +2733,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
 final chatProvider = StateNotifierProvider<ChatNotifier, ChatState>((ref) {
   final api = ref.watch(authApiClientProvider);
-  return ChatNotifier(api: api);
+  return ChatNotifier(api: api, ref: ref);
 });
 
 void _showNewGroupDialog(BuildContext context, WidgetRef ref) {
@@ -2577,4 +2980,628 @@ class _GroupDetailsPageState extends ConsumerState<GroupDetailsPage> {
       ),
     );
   }
+}
+
+// ==========================================
+// VoIP / Video WebRTC Calling Infrastructure
+// ==========================================
+
+enum CallStatus {
+  idle,
+  ringing, // Incoming call ringing
+  calling, // Outgoing call calling
+  connected,
+}
+
+class CallStateModel {
+  final CallStatus status;
+  final String conversationId;
+  final String otherUsername;
+  final String otherDeviceId;
+  final bool isVideo;
+  final bool isMuted;
+  final bool isCameraOff;
+  final bool isSpeakerphone;
+  final int duration;
+  final MediaStream? localStream;
+  final MediaStream? remoteStream;
+
+  CallStateModel({
+    this.status = CallStatus.idle,
+    this.conversationId = '',
+    this.otherUsername = '',
+    this.otherDeviceId = '',
+    this.isVideo = false,
+    this.isMuted = false,
+    this.isCameraOff = false,
+    this.isSpeakerphone = false,
+    this.duration = 0,
+    this.localStream,
+    this.remoteStream,
+  });
+
+  CallStateModel copyWith({
+    CallStatus? status,
+    String? conversationId,
+    String? otherUsername,
+    String? otherDeviceId,
+    bool? isVideo,
+    bool? isMuted,
+    bool? isCameraOff,
+    bool? isSpeakerphone,
+    int? duration,
+    MediaStream? localStream,
+    MediaStream? remoteStream,
+  }) {
+    return CallStateModel(
+      status: status ?? this.status,
+      conversationId: conversationId ?? this.conversationId,
+      otherUsername: otherUsername ?? this.otherUsername,
+      otherDeviceId: otherDeviceId ?? this.otherDeviceId,
+      isVideo: isVideo ?? this.isVideo,
+      isMuted: isMuted ?? this.isMuted,
+      isCameraOff: isCameraOff ?? this.isCameraOff,
+      isSpeakerphone: isSpeakerphone ?? this.isSpeakerphone,
+      duration: duration ?? this.duration,
+      localStream: localStream ?? this.localStream,
+      remoteStream: remoteStream ?? this.remoteStream,
+    );
+  }
+}
+
+class CallStateNotifier extends StateNotifier<CallStateModel> {
+  final Ref _ref;
+  RTCPeerConnection? _peerConnection;
+  Timer? _durationTimer;
+  final RTCVideoRenderer localRenderer = RTCVideoRenderer();
+  final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
+  String? _incomingSdp;
+  MediaStream? _localStream;
+
+  CallStateNotifier(this._ref) : super(CallStateModel()) {
+    _initRenderers();
+  }
+
+  Future<void> _initRenderers() async {
+    await localRenderer.initialize();
+    await remoteRenderer.initialize();
+  }
+
+  @override
+  void dispose() {
+    _durationTimer?.cancel();
+    localRenderer.dispose();
+    remoteRenderer.dispose();
+    super.dispose();
+  }
+
+  void _sendSignaling(int signalType, String sdpOrCandidate) {
+    final chatState = _ref.read(chatProvider.notifier);
+    final wsClient = chatState.wsClient;
+    final myDeviceId = chatState.myDeviceId;
+    
+    if (wsClient == null || myDeviceId == null || state.otherDeviceId.isEmpty) return;
+
+    final frame = {
+      'message_id': CborBytes(Uuid.parse(const Uuid().v4())),
+      'sender_device_id': CborBytes(Uuid.parse(myDeviceId)),
+      'recipient_device_id': CborBytes(Uuid.parse(state.otherDeviceId)),
+      'signal_type': signalType,
+      'sdp_or_candidate': CborString(sdpOrCandidate),
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    };
+
+    final binBytes = cbor.encode(CborValue(frame));
+    wsClient.sendEnvelope(Uint8List.fromList(binBytes));
+  }
+
+  Future<void> startCall({
+    required String conversationId,
+    required String otherUsername,
+    required String otherDeviceId,
+    required bool isVideo,
+  }) async {
+    state = CallStateModel(
+      status: CallStatus.calling,
+      conversationId: conversationId,
+      otherUsername: otherUsername,
+      otherDeviceId: otherDeviceId,
+      isVideo: isVideo,
+    );
+
+    try {
+      await [Permission.camera, Permission.microphone].request();
+
+      final Map<String, dynamic> mediaConstraints = {
+        'audio': true,
+        'video': isVideo ? {
+          'facingMode': 'user',
+          'width': '640',
+          'height': '480',
+        } : false,
+      };
+
+      final MediaStream stream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      _localStream = stream;
+      localRenderer.srcObject = stream;
+      state = state.copyWith(localStream: stream);
+
+      final Map<String, dynamic> configuration = {
+        'iceServers': [
+          {'urls': 'stun:stun.l.google.com:19302'},
+        ]
+      };
+      
+      _peerConnection = await createPeerConnection(configuration);
+
+      stream.getTracks().forEach((track) {
+        _peerConnection!.addTrack(track, stream);
+      });
+
+      _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+        _sendSignaling(10, jsonEncode({
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        }));
+      };
+
+      _peerConnection!.onTrack = (RTCTrackEvent event) {
+        if (event.streams.isNotEmpty) {
+          remoteRenderer.srcObject = event.streams[0];
+          state = state.copyWith(remoteStream: event.streams[0]);
+        }
+      };
+
+      final RTCSessionDescription offer = await _peerConnection!.createOffer();
+      await _peerConnection!.setLocalDescription(offer);
+
+      _sendSignaling(8, offer.sdp ?? '');
+      debugPrint('[CallStateNotifier] Outgoing WebRTC call started');
+    } catch (e) {
+      debugPrint('[CallStateNotifier] Error starting call: $e');
+      hangup();
+    }
+  }
+
+  Future<void> receiveOffer({
+    required String otherDeviceId,
+    required String sdp,
+    required bool isVideo,
+  }) async {
+    state = CallStateModel(
+      status: CallStatus.ringing,
+      conversationId: '',
+      otherUsername: 'Device: ' + otherDeviceId.substring(0, 8),
+      otherDeviceId: otherDeviceId,
+      isVideo: isVideo,
+    );
+    _incomingSdp = sdp;
+  }
+
+  Future<void> acceptCall() async {
+    if (_incomingSdp == null) return;
+
+    try {
+      await [Permission.camera, Permission.microphone].request();
+
+      final Map<String, dynamic> mediaConstraints = {
+        'audio': true,
+        'video': state.isVideo ? {
+          'facingMode': 'user',
+          'width': '640',
+          'height': '480',
+        } : false,
+      };
+
+      final MediaStream stream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      _localStream = stream;
+      localRenderer.srcObject = stream;
+      state = state.copyWith(localStream: stream);
+
+      final Map<String, dynamic> configuration = {
+        'iceServers': [
+          {'urls': 'stun:stun.l.google.com:19302'},
+        ]
+      };
+      
+      _peerConnection = await createPeerConnection(configuration);
+
+      stream.getTracks().forEach((track) {
+        _peerConnection!.addTrack(track, stream);
+      });
+
+      _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+        _sendSignaling(10, jsonEncode({
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        }));
+      };
+
+      _peerConnection!.onTrack = (RTCTrackEvent event) {
+        if (event.streams.isNotEmpty) {
+          remoteRenderer.srcObject = event.streams[0];
+          state = state.copyWith(remoteStream: event.streams[0]);
+        }
+      };
+
+      await _peerConnection!.setRemoteDescription(RTCSessionDescription(_incomingSdp!, 'offer'));
+
+      final RTCSessionDescription answer = await _peerConnection!.createAnswer();
+      await _peerConnection!.setLocalDescription(answer);
+
+      _sendSignaling(9, answer.sdp ?? '');
+      _startTimer();
+      state = state.copyWith(status: CallStatus.connected);
+      debugPrint('[CallStateNotifier] WebRTC call accepted');
+    } catch (e) {
+      debugPrint('[CallStateNotifier] Error accepting call: $e');
+      hangup();
+    }
+  }
+
+  Future<void> handleIncomingSignal(int type, String sdpOrCandidate) async {
+    if (type == 9 && _peerConnection != null) {
+      await _peerConnection!.setRemoteDescription(RTCSessionDescription(sdpOrCandidate, 'answer'));
+      _startTimer();
+      state = state.copyWith(status: CallStatus.connected);
+      debugPrint('[CallStateNotifier] WebRTC connected');
+    } else if (type == 10 && _peerConnection != null) {
+      try {
+        final data = jsonDecode(sdpOrCandidate);
+        final candidate = RTCIceCandidate(
+          data['candidate'],
+          data['sdpMid'],
+          data['sdpMLineIndex'],
+        );
+        await _peerConnection!.addCandidate(candidate);
+      } catch (e) {
+        debugPrint('[CallStateNotifier] Error adding ICE candidate: $e');
+      }
+    } else if (type == 11) {
+      debugPrint('[CallStateNotifier] Peer declined or disconnected call');
+      hangup(sendDeclineFrame: false);
+    }
+  }
+
+  Future<void> hangup({bool sendDeclineFrame = true}) async {
+    if (sendDeclineFrame && state.status != CallStatus.idle) {
+      _sendSignaling(11, 'hangup');
+    }
+
+    _durationTimer?.cancel();
+    _incomingSdp = null;
+
+    try {
+      if (_localStream != null) {
+        for (var track in _localStream!.getTracks()) {
+          track.stop();
+        }
+        await _localStream!.dispose();
+      }
+      await _peerConnection?.close();
+    } catch (e) {
+      debugPrint('[CallStateNotifier] Error disposing WebRTC resources: $e');
+    }
+
+    _localStream = null;
+    _peerConnection = null;
+    localRenderer.srcObject = null;
+    remoteRenderer.srcObject = null;
+
+    state = CallStateModel(status: CallStatus.idle);
+    debugPrint('[CallStateNotifier] WebRTC calling resources cleaned up');
+  }
+
+  void _startTimer() {
+    _durationTimer?.cancel();
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      state = state.copyWith(duration: state.duration + 1);
+    });
+  }
+
+  void toggleMute() {
+    if (_localStream != null) {
+      final audioTracks = _localStream!.getAudioTracks();
+      for (final track in audioTracks) {
+        track.enabled = !track.enabled;
+      }
+      state = state.copyWith(isMuted: !state.isMuted);
+    }
+  }
+
+  void toggleCamera() {
+    if (_localStream != null && state.isVideo) {
+      final videoTracks = _localStream!.getVideoTracks();
+      for (final track in videoTracks) {
+        track.enabled = !track.enabled;
+      }
+      state = state.copyWith(isCameraOff: !state.isCameraOff);
+    }
+  }
+
+  void toggleSpeakerphone() {
+    if (_localStream != null) {
+      Helper.setSpeakerphoneOn(!state.isSpeakerphone);
+      state = state.copyWith(isSpeakerphone: !state.isSpeakerphone);
+    }
+  }
+
+  void switchCamera() {
+    if (_localStream != null && state.isVideo) {
+      final videoTracks = _localStream!.getVideoTracks();
+      if (videoTracks.isNotEmpty) {
+        Helper.switchCamera(videoTracks.first);
+      }
+    }
+  }
+}
+
+final callStateProvider = StateNotifierProvider<CallStateNotifier, CallStateModel>((ref) {
+  return CallStateNotifier(ref);
+});
+
+class CallOverlayWrapper extends ConsumerWidget {
+  const CallOverlayWrapper({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final callState = ref.watch(callStateProvider);
+    if (callState.status == CallStatus.idle) {
+      return const SizedBox.shrink();
+    }
+    return Material(
+      color: Colors.transparent,
+      child: Positioned.fill(
+        child: CallScreen(callState: callState),
+      ),
+    );
+  }
+}
+
+class CallScreen extends ConsumerWidget {
+  final CallStateModel callState;
+  const CallScreen({super.key, required this.callState});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final callNotifier = ref.read(callStateProvider.notifier);
+
+    String durationText(int sec) {
+      final m = (sec ~/ 60).toString().padLeft(2, '0');
+      final s = (sec % 60).toString().padLeft(2, '0');
+      return '$m:$s';
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0B0814),
+      body: Stack(
+        children: [
+          // 1. Video background (Connected video call)
+          if (callState.status == CallStatus.connected && callState.isVideo && callState.remoteStream != null)
+            Positioned.fill(
+              child: RTCVideoView(
+                callNotifier.remoteRenderer,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              ),
+            )
+          else
+            // Dark audio/waiting layout
+            Positioned.fill(
+              child: Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Color(0xFF0B0814), Color(0xFF1F1035)],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Pulse calling avatar
+                    TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 1.0, end: 1.15),
+                      duration: const Duration(seconds: 1),
+                      curve: Curves.easeInOut,
+                      onEnd: () {},
+                      builder: (context, scale, child) {
+                        return Transform.scale(
+                          scale: callState.status == CallStatus.connected ? 1.0 : scale,
+                          child: Container(
+                            width: 120,
+                            height: 120,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: const Color(0xFF8A5CFF).withOpacity(0.2),
+                              border: Border.all(color: const Color(0xFF8A5CFF), width: 3),
+                            ),
+                            child: const Icon(Icons.person, size: 70, color: Colors.white),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      callState.otherUsername,
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      callState.status == CallStatus.calling
+                          ? 'Calling...'
+                          : callState.status == CallStatus.ringing
+                              ? 'Incoming ${callState.isVideo ? 'Video' : 'Voice'} Call...'
+                              : 'Connected',
+                      style: const TextStyle(color: Colors.greenAccent, fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // 2. Local PIP Video preview in top corner
+          if (callState.status == CallStatus.connected && callState.isVideo && callState.localStream != null && !callState.isCameraOff)
+            Positioned(
+              top: 40,
+              right: 20,
+              width: 110,
+              height: 150,
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white30, width: 2),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: RTCVideoView(
+                    callNotifier.localRenderer,
+                    mirror: true,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  ),
+                ),
+              ),
+            ),
+
+          // 3. Status call timer HUD
+          if (callState.status == CallStatus.connected)
+            Positioned(
+              top: 45,
+              left: 20,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.timer, size: 14, color: Colors.greenAccent),
+                    const SizedBox(width: 6),
+                    Text(
+                      durationText(callState.duration),
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // 4. Action buttons overlay at bottom
+          Positioned(
+            bottom: 40,
+            left: 20,
+            right: 20,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (callState.status == CallStatus.ringing)
+                  // Incoming Accept/Reject Row
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      FloatingActionButton(
+                        heroTag: 'decline_call',
+                        backgroundColor: Colors.red,
+                        onPressed: () => callNotifier.hangup(),
+                        child: const Icon(Icons.call_end, color: Colors.white),
+                      ),
+                      FloatingActionButton(
+                        heroTag: 'accept_call',
+                        backgroundColor: Colors.green,
+                        onPressed: () => callNotifier.acceptCall(),
+                        child: const Icon(Icons.call, color: Colors.white),
+                      ),
+                    ],
+                  )
+                else
+                  // Outgoing/Connected Controller Bar
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        IconButton(
+                          icon: Icon(
+                            callState.isMuted ? Icons.mic_off : Icons.mic,
+                            color: callState.isMuted ? Colors.redAccent : Colors.white,
+                          ),
+                          onPressed: () => callNotifier.toggleMute(),
+                        ),
+                        if (callState.isVideo) ...[
+                          IconButton(
+                            icon: Icon(
+                              callState.isCameraOff ? Icons.videocam_off : Icons.videocam,
+                              color: callState.isCameraOff ? Colors.redAccent : Colors.white,
+                            ),
+                            onPressed: () => callNotifier.toggleCamera(),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.switch_camera, color: Colors.white),
+                            onPressed: () => callNotifier.switchCamera(),
+                          ),
+                        ],
+                        IconButton(
+                          icon: Icon(
+                            callState.isSpeakerphone ? Icons.volume_up : Icons.volume_down,
+                            color: callState.isSpeakerphone ? const Color(0xFF8A5CFF) : Colors.white,
+                          ),
+                          onPressed: () => callNotifier.toggleSpeakerphone(),
+                        ),
+                        const SizedBox(width: 8),
+                        FloatingActionButton.small(
+                          heroTag: 'end_call',
+                          backgroundColor: Colors.red,
+                          onPressed: () => callNotifier.hangup(),
+                          child: const Icon(Icons.call_end, color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class VoiceWaveformPainter extends CustomPainter {
+  final List<double> amplitudeHistory;
+  final Color color;
+
+  VoiceWaveformPainter({required this.amplitudeHistory, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+
+    final double midY = size.height / 2;
+    final double spacing = size.width / 40;
+
+    for (int i = 0; i < amplitudeHistory.length; i++) {
+      final double x = i * spacing;
+      final double level = amplitudeHistory[i];
+      final double barHeight = size.height * level * 0.8;
+      
+      canvas.drawLine(
+        Offset(x, midY - barHeight / 2),
+        Offset(x, midY + barHeight / 2),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant VoiceWaveformPainter oldDelegate) => true;
 }
