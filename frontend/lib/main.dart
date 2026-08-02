@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cbor/cbor.dart';
 import 'package:uuid/uuid.dart';
+import 'package:cryptography/cryptography.dart';
 
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
@@ -2543,6 +2544,8 @@ class ChatNotifier extends StateNotifier<ChatState> {
     int? durationSeconds,
     Function(double progress)? onProgress,
   }) async {
+    debugPrint('[AttachmentPipeline] file selected: filename=$filename type=$type size=${fileBytes.length}');
+
     if (_wsClient == null || !state.isConnected) {
       throw Exception('Not connected to chat network');
     }
@@ -2552,7 +2555,12 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final conv = state.conversations[index];
 
     final mockKey = List.generate(32, (i) => i).join(''); // simple mock string representation
-    final fileHash = 'mock-sha256-hash-of-ciphertext';
+
+    // Real SHA-256 hash generation of file bytes
+    final hashObj = await Sha256().hash(fileBytes);
+    final fileHash = hashObj.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join('');
+    debugPrint('[AttachmentPipeline] hash generated: $fileHash');
+
     final int totalSize = fileBytes.length;
     
     // Use 128KB chunks for demo/upload speed
@@ -2562,6 +2570,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final messageId = const Uuid().v4();
 
     onProgress?.call(0.1);
+    debugPrint('[AttachmentPipeline] upload initiated: conversationId=$conversationId fileSize=$totalSize chunkCount=$chunkCount');
     final blobId = await _api.initiateUpload(
       sessionToken: sessionToken,
       conversationId: conversationId,
@@ -2570,28 +2579,34 @@ class ChatNotifier extends StateNotifier<ChatState> {
       mimeType: mimeType,
       chunkCount: chunkCount,
     );
+    debugPrint('[AttachmentPipeline] upload response received: blobId=$blobId');
 
     for (int i = 0; i < chunkCount; i++) {
       final start = i * chunkSize;
       final end = (start + chunkSize > totalSize) ? totalSize : start + chunkSize;
       final chunkData = fileBytes.sublist(start, end);
 
+      debugPrint('[AttachmentPipeline] chunk uploading: index=$i/$chunkCount size=${chunkData.length}');
       await _api.uploadChunk(
         sessionToken: sessionToken,
         blobId: blobId,
         chunkIndex: i,
         chunkBytes: chunkData,
       );
+      debugPrint('[AttachmentPipeline] chunk uploaded: index=$i/$chunkCount');
 
       final progress = 0.1 + (0.8 * (i + 1) / chunkCount);
       onProgress?.call(progress);
     }
+    debugPrint('[AttachmentPipeline] upload finalized: blobId=$blobId');
 
+    debugPrint('[AttachmentPipeline] attachment binding starting: blobId=$blobId messageId=$messageId');
     await _api.bindAttachment(
       sessionToken: sessionToken,
       blobId: blobId,
       messageId: messageId,
     );
+    debugPrint('[AttachmentPipeline] attachment bound: blobId=$blobId');
     onProgress?.call(0.95);
 
     final payloadJson = jsonEncode({
@@ -2601,16 +2616,20 @@ class ChatNotifier extends StateNotifier<ChatState> {
       'filename': filename,
       'mime_type': mimeType,
       'file_size': totalSize,
-      'duration_seconds': durationSeconds,
+      if (durationSeconds != null) 'duration_seconds': durationSeconds,
     });
 
+    final msgIdBytes = Uuid.parse(messageId);
+    final convIdBytes = Uuid.parse(conversationId);
+    final senderDeviceBytes = Uuid.parse(_myDeviceId!);
+    
+    final String recipientDeviceId = conv.isGroup ? '' : conv.otherDeviceId;
+
     if (conv.isGroup) {
+      debugPrint('[AttachmentPipeline] group message dispatch starting: conversationId=$conversationId');
       for (final deviceId in conv.groupMemberDeviceIds) {
         if (deviceId == _myDeviceId) continue;
-        
-        final msgIdBytes = Uuid.parse(messageId);
-        final convIdBytes = Uuid.parse(conversationId);
-        final senderDeviceBytes = Uuid.parse(_myDeviceId!);
+
         final recipientDeviceBytes = Uuid.parse(deviceId);
         final ciphertextBytes = Uint8List.fromList(utf8.encode(payloadJson));
 
@@ -2632,10 +2651,8 @@ class ChatNotifier extends StateNotifier<ChatState> {
         _wsClient!.sendEnvelope(Uint8List.fromList(binBytes));
       }
     } else {
-      final msgIdBytes = Uuid.parse(messageId);
-      final convIdBytes = Uuid.parse(conversationId);
-      final senderDeviceBytes = Uuid.parse(_myDeviceId!);
-      final recipientDeviceBytes = Uuid.parse(conv.otherDeviceId);
+      debugPrint('[AttachmentPipeline] 1-to-1 message dispatch starting: messageId=$messageId recipient=$recipientDeviceId');
+      final recipientDeviceBytes = Uuid.parse(recipientDeviceId);
       final ciphertextBytes = Uint8List.fromList(utf8.encode(payloadJson));
 
       final map = {
@@ -2672,7 +2689,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
       mimeType: mimeType,
       fileSize: totalSize,
       durationSeconds: durationSeconds,
-      decryptedData: fileBytes, // pre-load local cache for uploader
+      decryptedData: fileBytes,
     );
 
     final updatedMessages = List<ChatMessage>.from(conv.messages)..add(localMessage);
@@ -2680,6 +2697,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     updatedConversations[index] = conv.copyWith(messages: updatedMessages);
     state = state.copyWith(conversations: updatedConversations);
     onProgress?.call(1.0);
+    debugPrint('[AttachmentPipeline] message sent: messageId=$messageId');
   }
 
   Future<void> downloadMedia({
@@ -3101,6 +3119,9 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
     required String otherDeviceId,
     required bool isVideo,
   }) async {
+    debugPrint('[CallPipeline] call button pressed: isVideo=$isVideo otherUsername=$otherUsername otherDeviceId=$otherDeviceId');
+    
+    debugPrint('[CallPipeline] state transitions: status=calling');
     state = CallStateModel(
       status: CallStatus.calling,
       conversationId: conversationId,
@@ -3110,6 +3131,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
     );
 
     try {
+      debugPrint('[CallPipeline] requesting camera & mic permissions');
       await [Permission.camera, Permission.microphone].request();
 
       final Map<String, dynamic> mediaConstraints = {
@@ -3121,6 +3143,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
         } : false,
       };
 
+      debugPrint('[CallPipeline] getting user media');
       final MediaStream stream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
       _localStream = stream;
       localRenderer.srcObject = stream;
@@ -3132,6 +3155,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
         ]
       };
       
+      debugPrint('[CallPipeline] creating RTCPeerConnection');
       _peerConnection = await createPeerConnection(configuration);
 
       stream.getTracks().forEach((track) {
@@ -3139,6 +3163,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
       });
 
       _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+        debugPrint('[CallPipeline] ICE candidate sent: ${candidate.candidate}');
         _sendSignaling(10, jsonEncode({
           'candidate': candidate.candidate,
           'sdpMid': candidate.sdpMid,
@@ -3148,14 +3173,19 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
 
       _peerConnection!.onTrack = (RTCTrackEvent event) {
         if (event.streams.isNotEmpty) {
+          debugPrint('[CallPipeline] remote stream track received');
           remoteRenderer.srcObject = event.streams[0];
           state = state.copyWith(remoteStream: event.streams[0]);
         }
       };
 
+      debugPrint('[CallPipeline] creating WebRTC offer');
       final RTCSessionDescription offer = await _peerConnection!.createOffer();
+      debugPrint('[CallPipeline] offer created');
+
       await _peerConnection!.setLocalDescription(offer);
 
+      debugPrint('[CallPipeline] offer sent to websocket');
       _sendSignaling(8, offer.sdp ?? '');
       debugPrint('[CallStateNotifier] Outgoing WebRTC call started');
     } catch (e) {
@@ -3169,6 +3199,8 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
     required String sdp,
     required bool isVideo,
   }) async {
+    debugPrint('[CallPipeline] offer received: isVideo=$isVideo sender=$otherDeviceId');
+    debugPrint('[CallPipeline] state transitions: status=ringing');
     state = CallStateModel(
       status: CallStatus.ringing,
       conversationId: '',
@@ -3181,8 +3213,10 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
 
   Future<void> acceptCall() async {
     if (_incomingSdp == null) return;
+    debugPrint('[CallPipeline] accept call pressed');
 
     try {
+      debugPrint('[CallPipeline] requesting camera & mic permissions');
       await [Permission.camera, Permission.microphone].request();
 
       final Map<String, dynamic> mediaConstraints = {
@@ -3194,6 +3228,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
         } : false,
       };
 
+      debugPrint('[CallPipeline] getting user media');
       final MediaStream stream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
       _localStream = stream;
       localRenderer.srcObject = stream;
@@ -3205,6 +3240,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
         ]
       };
       
+      debugPrint('[CallPipeline] creating RTCPeerConnection');
       _peerConnection = await createPeerConnection(configuration);
 
       stream.getTracks().forEach((track) {
@@ -3212,6 +3248,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
       });
 
       _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+        debugPrint('[CallPipeline] ICE candidate sent: ${candidate.candidate}');
         _sendSignaling(10, jsonEncode({
           'candidate': candidate.candidate,
           'sdpMid': candidate.sdpMid,
@@ -3221,18 +3258,24 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
 
       _peerConnection!.onTrack = (RTCTrackEvent event) {
         if (event.streams.isNotEmpty) {
+          debugPrint('[CallPipeline] remote stream track received');
           remoteRenderer.srcObject = event.streams[0];
           state = state.copyWith(remoteStream: event.streams[0]);
         }
       };
 
+      debugPrint('[CallPipeline] setting remote offer description');
       await _peerConnection!.setRemoteDescription(RTCSessionDescription(_incomingSdp!, 'offer'));
 
+      debugPrint('[CallPipeline] creating WebRTC answer');
       final RTCSessionDescription answer = await _peerConnection!.createAnswer();
       await _peerConnection!.setLocalDescription(answer);
 
+      debugPrint('[CallPipeline] answer sent to websocket');
       _sendSignaling(9, answer.sdp ?? '');
       _startTimer();
+      
+      debugPrint('[CallPipeline] state transitions: status=connected');
       state = state.copyWith(status: CallStatus.connected);
       debugPrint('[CallStateNotifier] WebRTC call accepted');
     } catch (e) {
@@ -3243,13 +3286,16 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
 
   Future<void> handleIncomingSignal(int type, String sdpOrCandidate) async {
     if (type == 9 && _peerConnection != null) {
+      debugPrint('[CallPipeline] answer received from websocket');
       await _peerConnection!.setRemoteDescription(RTCSessionDescription(sdpOrCandidate, 'answer'));
       _startTimer();
+      debugPrint('[CallPipeline] state transitions: status=connected');
       state = state.copyWith(status: CallStatus.connected);
       debugPrint('[CallStateNotifier] WebRTC connected');
     } else if (type == 10 && _peerConnection != null) {
       try {
         final data = jsonDecode(sdpOrCandidate);
+        debugPrint('[CallPipeline] ICE candidate received: ${data['candidate']}');
         final candidate = RTCIceCandidate(
           data['candidate'],
           data['sdpMid'],
@@ -3266,6 +3312,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
   }
 
   Future<void> hangup({bool sendDeclineFrame = true}) async {
+    debugPrint('[CallPipeline] hangup requested: sendDeclineFrame=$sendDeclineFrame');
     if (sendDeclineFrame && state.status != CallStatus.idle) {
       _sendSignaling(11, 'hangup');
     }
@@ -3290,6 +3337,7 @@ class CallStateNotifier extends StateNotifier<CallStateModel> {
     localRenderer.srcObject = null;
     remoteRenderer.srcObject = null;
 
+    debugPrint('[CallPipeline] state transitions: status=idle');
     state = CallStateModel(status: CallStatus.idle);
     debugPrint('[CallStateNotifier] WebRTC calling resources cleaned up');
   }
@@ -3351,9 +3399,9 @@ class CallOverlayWrapper extends ConsumerWidget {
     if (callState.status == CallStatus.idle) {
       return const SizedBox.shrink();
     }
-    return Material(
-      color: Colors.transparent,
-      child: Positioned.fill(
+    return Positioned.fill(
+      child: Material(
+        color: Colors.transparent,
         child: CallScreen(callState: callState),
       ),
     );
