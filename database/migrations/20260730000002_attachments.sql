@@ -4,7 +4,7 @@ CREATE TABLE attachment_blobs (
     id UUID PRIMARY KEY, -- Random UUIDv4 only
     uploader_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     conversation_id UUID NOT NULL, -- Logical group scope
-    message_id UUID, -- References logical message
+    message_id UUID REFERENCES pending_messages(id) ON DELETE SET NULL, -- References message in the queue
     file_size BIGINT NOT NULL,
     file_hash BYTEA NOT NULL, -- SHA-256 of completed ciphertext
     mime_type VARCHAR(255) NOT NULL,
