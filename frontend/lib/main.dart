@@ -1,5 +1,6 @@
 // frontend/lib/main.dart
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -842,6 +843,49 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
 
+  // Media upload progress state
+  double? _uploadProgress;
+  String? _uploadStatusText;
+
+  // Voice note playback simulation state
+  String? _playingMessageId;
+  int _playingSeconds = 0;
+  Timer? _playTimer;
+
+  @override
+  void dispose() {
+    _playTimer?.cancel();
+    _messageController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _startVoiceNoteTimer(String messageId, int maxDuration) {
+    _playTimer?.cancel();
+    setState(() {
+      _playingMessageId = messageId;
+      _playingSeconds = 0;
+    });
+
+    _playTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_playingSeconds >= maxDuration) {
+        _stopVoiceNoteTimer();
+      } else {
+        setState(() {
+          _playingSeconds += 1;
+        });
+      }
+    });
+  }
+
+  void _stopVoiceNoteTimer() {
+    _playTimer?.cancel();
+    setState(() {
+      _playingMessageId = null;
+      _playingSeconds = 0;
+    });
+  }
+
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
@@ -852,6 +896,591 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         );
       }
     });
+  }
+
+  Widget _buildMessageContent(ChatMessage msg, ChatConversation conv, String sessionToken) {
+    if (msg.type == 'image') {
+      if (msg.decryptedData != null) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.memory(
+                msg.decryptedData!,
+                width: 220,
+                height: 180,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Container(
+                  width: 220,
+                  height: 180,
+                  color: Colors.white12,
+                  child: const Center(
+                    child: Icon(Icons.broken_image, color: Colors.white60, size: 40),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              msg.filename ?? 'image.png',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+            ),
+            Text(
+              '${(msg.fileSize ?? 0) ~/ 1024} KB',
+              style: const TextStyle(fontSize: 10, color: Colors.white60),
+            ),
+          ],
+        );
+      } else if (msg.isDownloading) {
+        return const SizedBox(
+          width: 200,
+          height: 80,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2.0, color: Colors.white),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Downloading & Decrypting...',
+                style: TextStyle(fontSize: 11, color: Colors.white70),
+              ),
+            ],
+          ),
+        );
+      } else {
+        return InkWell(
+          onTap: () => ref.read(chatProvider.notifier).downloadMedia(
+            sessionToken: sessionToken,
+            conversationId: conv.conversationId,
+            messageId: msg.messageId,
+            blobId: msg.blobId!,
+          ),
+          child: Container(
+            width: 200,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.image, color: Colors.purpleAccent, size: 36),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        msg.filename ?? 'image.png',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        'Tap to download • ${(msg.fileSize ?? 0) ~/ 1024} KB',
+                        style: const TextStyle(fontSize: 10, color: Colors.white60),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+    } else if (msg.type == 'file') {
+      if (msg.decryptedData != null) {
+        return Container(
+          width: 220,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.green.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.green.withOpacity(0.3)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.file_present, color: Colors.greenAccent, size: 32),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      msg.filename ?? 'document.pdf',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      'Decrypted & Saved • ${(msg.fileSize ?? 0) ~/ 1024} KB',
+                      style: const TextStyle(fontSize: 10, color: Colors.white60),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      } else if (msg.isDownloading) {
+        return const SizedBox(
+          width: 200,
+          height: 60,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2.0, color: Colors.white),
+              ),
+              SizedBox(width: 12),
+              Text(
+                'Downloading File...',
+                style: TextStyle(fontSize: 11, color: Colors.white70),
+              ),
+            ],
+          ),
+        );
+      } else {
+        return InkWell(
+          onTap: () => ref.read(chatProvider.notifier).downloadMedia(
+            sessionToken: sessionToken,
+            conversationId: conv.conversationId,
+            messageId: msg.messageId,
+            blobId: msg.blobId!,
+          ),
+          child: Container(
+            width: 200,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.insert_drive_file, color: Colors.blueAccent, size: 36),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        msg.filename ?? 'document.pdf',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        'Tap to download • ${(msg.fileSize ?? 0) ~/ 1024} KB',
+                        style: const TextStyle(fontSize: 10, color: Colors.white60),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+    } else if (msg.type == 'voice') {
+      final isPlaying = _playingMessageId == msg.messageId;
+      final currentPos = isPlaying ? _playingSeconds : 0;
+      final duration = msg.durationSeconds ?? 5;
+      
+      if (msg.isDownloading) {
+        return const SizedBox(
+          width: 180,
+          height: 44,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.white),
+              ),
+              SizedBox(width: 10),
+              Text('Fetching audio...', style: TextStyle(fontSize: 11, color: Colors.white70)),
+            ],
+          ),
+        );
+      }
+      
+      return Container(
+        width: 230,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.06),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            IconButton(
+              icon: Icon(
+                isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                color: Colors.purpleAccent,
+                size: 32,
+              ),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: () {
+                if (msg.decryptedData == null) {
+                  ref.read(chatProvider.notifier).downloadMedia(
+                    sessionToken: sessionToken,
+                    conversationId: conv.conversationId,
+                    messageId: msg.messageId,
+                    blobId: msg.blobId!,
+                  );
+                } else {
+                  if (isPlaying) {
+                    _stopVoiceNoteTimer();
+                  } else {
+                    _startVoiceNoteTimer(msg.messageId, duration);
+                  }
+                }
+              },
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 4),
+                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 8),
+                      trackHeight: 2,
+                      activeTrackColor: Colors.purpleAccent,
+                      inactiveTrackColor: Colors.white24,
+                      thumbColor: Colors.purpleAccent,
+                    ),
+                    child: Slider(
+                      value: currentPos.toDouble(),
+                      min: 0,
+                      max: duration.toDouble(),
+                      onChanged: (val) {
+                        if (isPlaying && msg.decryptedData != null) {
+                          setState(() {
+                            _playingSeconds = val.toInt();
+                          });
+                        }
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '0:${currentPos.toString().padLeft(2, '0')}',
+                          style: const TextStyle(fontSize: 9, color: Colors.white60),
+                        ),
+                        Text(
+                          '0:${duration.toString().padLeft(2, '0')}',
+                          style: const TextStyle(fontSize: 9, color: Colors.white60),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    return Text(msg.text, style: const TextStyle(color: Colors.white));
+  }
+
+  void _showAttachmentMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E2E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'Send Encrypted Attachment',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+              ),
+              const Divider(color: Colors.white12),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Colors.purple,
+                  child: Icon(Icons.image, color: Colors.white),
+                ),
+                title: const Text('Share Encrypted Photo'),
+                subtitle: const Text('Simulate securely picking and sending an image', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _sendMockImage();
+                },
+              ),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Colors.blue,
+                  child: Icon(Icons.insert_drive_file, color: Colors.white),
+                ),
+                title: const Text('Share Encrypted Document'),
+                subtitle: const Text('Simulate securely picking and sending a file', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _sendMockDocument();
+                },
+              ),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Colors.red,
+                  child: Icon(Icons.mic, color: Colors.white),
+                ),
+                title: const Text('Record Voice Note'),
+                subtitle: const Text('Simulate audio recorder interface and dispatch', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showVoiceRecordSheet();
+                },
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _sendMockImage() async {
+    final authState = ref.read(authProvider);
+    if (authState is! AuthSuccess) return;
+    final sessionToken = authState.session.accessToken;
+
+    const String base64Png = "iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==";
+    final bytes = base64Decode(base64Png);
+    
+    setState(() {
+      _uploadProgress = 0.0;
+      _uploadStatusText = 'Encrypting & preparing image...';
+    });
+
+    try {
+      await ref.read(chatProvider.notifier).sendMediaMessage(
+        sessionToken: sessionToken,
+        conversationId: widget.conversation.conversationId,
+        type: 'image',
+        filename: 'veil_secure_artwork_${DateTime.now().millisecond}.png',
+        mimeType: 'image/png',
+        fileBytes: Uint8List.fromList(bytes),
+        onProgress: (progress) {
+          setState(() {
+            _uploadProgress = progress;
+            _uploadStatusText = 'Uploading image chunks (${(progress * 100).toInt()}%)...';
+          });
+        },
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Upload failed: $e')),
+      );
+    } finally {
+      setState(() {
+        _uploadProgress = null;
+        _uploadStatusText = null;
+      });
+    }
+  }
+
+  void _sendMockDocument() async {
+    final authState = ref.read(authProvider);
+    if (authState is! AuthSuccess) return;
+    final sessionToken = authState.session.accessToken;
+
+    final bytes = utf8.encode("VEIL SECURE AUDIT REPORT\nCONFIDENTIAL - DO NOT SHARE\nSHA-256 Verified.");
+    
+    setState(() {
+      _uploadProgress = 0.0;
+      _uploadStatusText = 'Encrypting document...';
+    });
+
+    try {
+      await ref.read(chatProvider.notifier).sendMediaMessage(
+        sessionToken: sessionToken,
+        conversationId: widget.conversation.conversationId,
+        type: 'file',
+        filename: 'security_audit_report.pdf',
+        mimeType: 'application/pdf',
+        fileBytes: Uint8List.fromList(bytes),
+        onProgress: (progress) {
+          setState(() {
+            _uploadProgress = progress;
+            _uploadStatusText = 'Uploading document chunks (${(progress * 100).toInt()}%)...';
+          });
+        },
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Upload failed: $e')),
+      );
+    } finally {
+      setState(() {
+        _uploadProgress = null;
+        _uploadStatusText = null;
+      });
+    }
+  }
+
+  void _showVoiceRecordSheet() {
+    int duration = 0;
+    Timer? recordTimer;
+    bool isRecording = true;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            if (recordTimer == null && isRecording) {
+              recordTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+                setModalState(() {
+                  duration += 1;
+                });
+              });
+            }
+            
+            return AlertDialog(
+              backgroundColor: const Color(0xFF1A1029),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Center(
+                child: Text(
+                  'Recording Encrypted Voice Note',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: 16),
+                  Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Container(
+                        width: 70,
+                        height: 70,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.red.withOpacity(0.1 + (duration % 2 == 0 ? 0.2 : 0.05)),
+                        ),
+                      ),
+                      const CircleAvatar(
+                        radius: 28,
+                        backgroundColor: Colors.red,
+                        child: Icon(Icons.mic, color: Colors.white, size: 32),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '0:${duration.toString().padLeft(2, '0')}',
+                    style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Secure E2E hardware channel bound',
+                    style: TextStyle(fontSize: 10, color: Colors.greenAccent),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              ),
+              actionsAlignment: MainAxisAlignment.spaceAround,
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    recordTimer?.cancel();
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () async {
+                    recordTimer?.cancel();
+                    Navigator.pop(context);
+                    
+                    if (duration < 1) return;
+                    
+                    final authState = ref.read(authProvider);
+                    if (authState is! AuthSuccess) return;
+                    final sessionToken = authState.session.accessToken;
+
+                    final voiceBytes = utf8.encode("VEIL MOCK AUDIO BITSTREAM: Opus 16kHz audio data.");
+                    
+                    setState(() {
+                      _uploadProgress = 0.0;
+                      _uploadStatusText = 'Encoding voice note...';
+                    });
+
+                    try {
+                      await ref.read(chatProvider.notifier).sendMediaMessage(
+                        sessionToken: sessionToken,
+                        conversationId: widget.conversation.conversationId,
+                        type: 'voice',
+                        filename: 'voice_note_${DateTime.now().millisecond}.opus',
+                        mimeType: 'audio/opus',
+                        fileBytes: Uint8List.fromList(voiceBytes),
+                        durationSeconds: duration,
+                        onProgress: (progress) {
+                          setState(() {
+                            _uploadProgress = progress;
+                            _uploadStatusText = 'Uploading voice note (${(progress * 100).toInt()}%)...';
+                          });
+                        },
+                      );
+                    } catch (e) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Voice note sending failed: $e')),
+                      );
+                    } finally {
+                      setState(() {
+                        _uploadProgress = null;
+                        _uploadStatusText = null;
+                      });
+                    }
+                  },
+                  child: const Text('Stop & Send'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    ).then((_) => recordTimer?.cancel());
   }
 
   @override
@@ -865,8 +1494,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     final authState = ref.watch(authProvider);
     String myDeviceId = '';
+    String sessionToken = '';
     if (authState is AuthSuccess) {
       myDeviceId = authState.credentials.deviceId;
+      sessionToken = authState.session.accessToken;
     }
 
     _scrollToBottom();
@@ -952,7 +1583,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Text(msg.text, style: const TextStyle(color: Colors.white)),
+                              _buildMessageContent(msg, conv, sessionToken),
                               const SizedBox(height: 4),
                               Text(
                                 '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}',
@@ -965,11 +1596,41 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     },
                   ),
           ),
+          if (_uploadStatusText != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: const Color(0xFF1E1E2E),
+              child: Row(
+                children: [
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.purpleAccent),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _uploadStatusText!,
+                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                  ),
+                  if (_uploadProgress != null)
+                    Text(
+                      '${(_uploadProgress! * 100).toInt()}%',
+                      style: const TextStyle(fontSize: 12, color: Colors.purpleAccent, fontWeight: FontWeight.bold),
+                    ),
+                ],
+              ),
+            ),
           Container(
             padding: const EdgeInsets.all(12),
             color: const Color(0xFF1E1E2E),
             child: Row(
               children: [
+                IconButton(
+                  icon: const Icon(Icons.add, color: Colors.purpleAccent),
+                  onPressed: _showAttachmentMenu,
+                ),
                 Expanded(
                   child: TextField(
                     controller: _messageController,
@@ -1007,13 +1668,67 @@ class ChatMessage {
   final String senderDeviceId;
   final String text;
   final DateTime timestamp;
+  
+  // Media fields
+  final String? type; // 'text', 'image', 'file', 'voice'
+  final String? blobId;
+  final String? fileKey;
+  final String? filename;
+  final String? mimeType;
+  final int? fileSize;
+  final int? durationSeconds;
+
+  // Local decrypted cache of media file bytes
+  final Uint8List? decryptedData;
+  final bool isDownloading;
 
   ChatMessage({
     required this.messageId,
     required this.senderDeviceId,
     required this.text,
     required this.timestamp,
+    this.type = 'text',
+    this.blobId,
+    this.fileKey,
+    this.filename,
+    this.mimeType,
+    this.fileSize,
+    this.durationSeconds,
+    this.decryptedData,
+    this.isDownloading = false,
   });
+
+  ChatMessage copyWith({
+    String? messageId,
+    String? senderDeviceId,
+    String? text,
+    DateTime? timestamp,
+    String? type,
+    String? blobId,
+    String? fileKey,
+    String? filename,
+    String? mimeType,
+    int? fileSize,
+    int? durationSeconds,
+    Uint8List? decryptedData,
+    bool? isDownloading,
+  }) {
+    return ChatMessage(
+      messageId: messageId ?? this.messageId,
+      senderDeviceId: senderDeviceId ?? this.senderDeviceId,
+      text: text ?? this.text,
+      timestamp: timestamp ?? this.timestamp,
+      type: type ?? this.type,
+      blobId: blobId ?? this.blobId,
+      fileKey: fileKey ?? this.fileKey,
+      filename: filename ?? this.filename,
+      mimeType: mimeType ?? this.mimeType,
+      fileSize: fileSize ?? this.fileSize,
+      durationSeconds: durationSeconds ?? this.durationSeconds,
+      decryptedData: decryptedData ?? this.decryptedData,
+      isDownloading: isDownloading ?? this.isDownloading,
+    );
+  }
 }
 
 class ChatConversation {
@@ -1221,11 +1936,50 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
         debugPrint('[ChatNotifier] Received message envelope over WS: "$text" in conv $conversationId');
 
+        String displayText = text;
+        String? msgType = 'text';
+        String? blobId;
+        String? fileKey;
+        String? filename;
+        String? mimeType;
+        int? fileSize;
+        int? durationSeconds;
+
+        try {
+          final payload = jsonDecode(text);
+          if (payload is Map<String, dynamic> && payload.containsKey('type')) {
+            msgType = payload['type'] as String?;
+            blobId = payload['blob_id'] as String?;
+            fileKey = payload['file_key'] as String?;
+            filename = payload['filename'] as String?;
+            mimeType = payload['mime_type'] as String?;
+            fileSize = payload['file_size'] as int?;
+            durationSeconds = payload['duration_seconds'] as int?;
+            
+            if (msgType == 'image') {
+              displayText = 'Sent an image: ${filename ?? 'image.png'}';
+            } else if (msgType == 'file') {
+              displayText = 'Sent a file: ${filename ?? 'file.dat'}';
+            } else if (msgType == 'voice') {
+              displayText = 'Sent a voice message (${durationSeconds ?? 0}s)';
+            }
+          }
+        } catch (_) {
+          // Standard text message
+        }
+
         final newMessage = ChatMessage(
           messageId: messageId,
           senderDeviceId: senderDeviceId,
-          text: text,
+          text: displayText,
           timestamp: DateTime.now(),
+          type: msgType,
+          blobId: blobId,
+          fileKey: fileKey,
+          filename: filename,
+          mimeType: mimeType,
+          fileSize: fileSize,
+          durationSeconds: durationSeconds,
         );
 
         final index = state.conversations.indexWhere((c) => c.conversationId == conversationId);
@@ -1374,6 +2128,203 @@ class ChatNotifier extends StateNotifier<ChatState> {
     _wsClient?.disconnect();
     _wsClient = null;
     state = ChatState(conversations: []);
+  }
+
+  Future<void> sendMediaMessage({
+    required String sessionToken,
+    required String conversationId,
+    required String type, // 'image', 'file', 'voice'
+    required String filename,
+    required String mimeType,
+    required Uint8List fileBytes,
+    int? durationSeconds,
+    Function(double progress)? onProgress,
+  }) async {
+    if (_wsClient == null || !state.isConnected) {
+      throw Exception('Not connected to chat network');
+    }
+
+    final index = state.conversations.indexWhere((c) => c.conversationId == conversationId);
+    if (index == -1) throw Exception('Conversation not found');
+    final conv = state.conversations[index];
+
+    final mockKey = List.generate(32, (i) => i).join(''); // simple mock string representation
+    final fileHash = 'mock-sha256-hash-of-ciphertext';
+    final int totalSize = fileBytes.length;
+    
+    // Use 128KB chunks for demo/upload speed
+    final int chunkSize = 128 * 1024;
+    final int chunkCount = (totalSize / chunkSize).ceil();
+
+    final messageId = const Uuid().v4();
+
+    onProgress?.call(0.1);
+    final blobId = await _api.initiateUpload(
+      sessionToken: sessionToken,
+      conversationId: conversationId,
+      fileSize: totalSize,
+      fileHash: fileHash,
+      mimeType: mimeType,
+      chunkCount: chunkCount,
+    );
+
+    for (int i = 0; i < chunkCount; i++) {
+      final start = i * chunkSize;
+      final end = (start + chunkSize > totalSize) ? totalSize : start + chunkSize;
+      final chunkData = fileBytes.sublist(start, end);
+
+      await _api.uploadChunk(
+        sessionToken: sessionToken,
+        blobId: blobId,
+        chunkIndex: i,
+        chunkBytes: chunkData,
+      );
+
+      final progress = 0.1 + (0.8 * (i + 1) / chunkCount);
+      onProgress?.call(progress);
+    }
+
+    await _api.bindAttachment(
+      sessionToken: sessionToken,
+      blobId: blobId,
+      messageId: messageId,
+    );
+    onProgress?.call(0.95);
+
+    final payloadJson = jsonEncode({
+      'type': type,
+      'blob_id': blobId,
+      'file_key': mockKey,
+      'filename': filename,
+      'mime_type': mimeType,
+      'file_size': totalSize,
+      'duration_seconds': durationSeconds,
+    });
+
+    if (conv.isGroup) {
+      for (final deviceId in conv.groupMemberDeviceIds) {
+        if (deviceId == _myDeviceId) continue;
+        
+        final msgIdBytes = Uuid.parse(messageId);
+        final convIdBytes = Uuid.parse(conversationId);
+        final senderDeviceBytes = Uuid.parse(_myDeviceId!);
+        final recipientDeviceBytes = Uuid.parse(deviceId);
+        final ciphertextBytes = Uint8List.fromList(utf8.encode(payloadJson));
+
+        final map = {
+          'message_id': CborBytes(msgIdBytes),
+          'conversation_id': CborBytes(convIdBytes),
+          'sender_device_id': CborBytes(senderDeviceBytes),
+          'recipient_device_id': CborBytes(recipientDeviceBytes),
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'dh_pub': CborBytes(Uint8List(32)),
+          'ciphertext': CborBytes(ciphertextBytes),
+          'signature': CborBytes(Uint8List(64)),
+          'major_version': 1,
+          'minor_version': 0,
+          'message_number': conv.messages.length + 1,
+        };
+
+        final binBytes = cbor.encode(CborValue(map));
+        _wsClient!.sendEnvelope(Uint8List.fromList(binBytes));
+      }
+    } else {
+      final msgIdBytes = Uuid.parse(messageId);
+      final convIdBytes = Uuid.parse(conversationId);
+      final senderDeviceBytes = Uuid.parse(_myDeviceId!);
+      final recipientDeviceBytes = Uuid.parse(conv.otherDeviceId);
+      final ciphertextBytes = Uint8List.fromList(utf8.encode(payloadJson));
+
+      final map = {
+        'message_id': CborBytes(msgIdBytes),
+        'conversation_id': CborBytes(convIdBytes),
+        'sender_device_id': CborBytes(senderDeviceBytes),
+        'recipient_device_id': CborBytes(recipientDeviceBytes),
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'dh_pub': CborBytes(Uint8List(32)),
+        'ciphertext': CborBytes(ciphertextBytes),
+        'signature': CborBytes(Uint8List(64)),
+        'major_version': 1,
+        'minor_version': 0,
+        'message_number': conv.messages.length + 1,
+      };
+
+      final binBytes = cbor.encode(CborValue(map));
+      _wsClient!.sendEnvelope(Uint8List.fromList(binBytes));
+    }
+
+    final localMessage = ChatMessage(
+      messageId: messageId,
+      senderDeviceId: _myDeviceId!,
+      text: type == 'image'
+          ? 'Sent an image: $filename'
+          : type == 'file'
+              ? 'Sent a file: $filename'
+              : 'Sent a voice message (${durationSeconds}s)',
+      timestamp: DateTime.now(),
+      type: type,
+      blobId: blobId,
+      fileKey: mockKey,
+      filename: filename,
+      mimeType: mimeType,
+      fileSize: totalSize,
+      durationSeconds: durationSeconds,
+      decryptedData: fileBytes, // pre-load local cache for uploader
+    );
+
+    final updatedMessages = List<ChatMessage>.from(conv.messages)..add(localMessage);
+    final updatedConversations = List<ChatConversation>.from(state.conversations);
+    updatedConversations[index] = conv.copyWith(messages: updatedMessages);
+    state = state.copyWith(conversations: updatedConversations);
+    onProgress?.call(1.0);
+  }
+
+  Future<void> downloadMedia({
+    required String sessionToken,
+    required String conversationId,
+    required String messageId,
+    required String blobId,
+  }) async {
+    final index = state.conversations.indexWhere((c) => c.conversationId == conversationId);
+    if (index == -1) return;
+    final conv = state.conversations[index];
+
+    final msgIndex = conv.messages.indexWhere((m) => m.messageId == messageId);
+    if (msgIndex == -1) return;
+    
+    final updatedConversations = List<ChatConversation>.from(state.conversations);
+    final updatedMessages = List<ChatMessage>.from(conv.messages);
+    updatedMessages[msgIndex] = updatedMessages[msgIndex].copyWith(isDownloading: true);
+    updatedConversations[index] = conv.copyWith(messages: updatedMessages);
+    state = state.copyWith(conversations: updatedConversations);
+
+    try {
+
+      final dataBytes = await _api.downloadAttachment(
+        sessionToken: sessionToken,
+        blobId: blobId,
+      );
+
+      final freshConversations = List<ChatConversation>.from(state.conversations);
+      final freshMessages = List<ChatMessage>.from(freshConversations[index].messages);
+      freshMessages[msgIndex] = freshMessages[msgIndex].copyWith(
+        isDownloading: false,
+        decryptedData: Uint8List.fromList(dataBytes),
+      );
+      freshConversations[index] = freshConversations[index].copyWith(messages: freshMessages);
+      state = state.copyWith(conversations: freshConversations);
+      
+      debugPrint('[ChatNotifier] Attachment downloaded: $blobId');
+    } catch (e) {
+      debugPrint('[ChatNotifier] Download attachment failed: $e');
+      
+      final freshConversations = List<ChatConversation>.from(state.conversations);
+      final freshMessages = List<ChatMessage>.from(freshConversations[index].messages);
+      freshMessages[msgIndex] = freshMessages[msgIndex].copyWith(isDownloading: false);
+      freshConversations[index] = freshConversations[index].copyWith(messages: freshMessages);
+      state = state.copyWith(conversations: freshConversations);
+      rethrow;
+    }
   }
 }
 

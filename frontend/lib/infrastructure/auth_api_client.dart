@@ -252,4 +252,97 @@ class AuthApiClient {
       throw Exception(response.body);
     }
   }
+
+  Future<String> initiateUpload({
+    required String sessionToken,
+    required String conversationId,
+    required int fileSize,
+    required String fileHash,
+    required String mimeType,
+    required int chunkCount,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/attachments/initiate');
+    print('[AuthApiClient] Sending POST request to: $url');
+    final response = await _client.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $sessionToken',
+      },
+      body: jsonEncode({
+        'conversation_id': conversationId,
+        'file_size': fileSize,
+        'file_hash': fileHash,
+        'mime_type': mimeType,
+        'chunk_count': chunkCount,
+      }),
+    );
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return data['blob_id'] as String;
+  }
+
+  Future<void> uploadChunk({
+    required String sessionToken,
+    required String blobId,
+    required int chunkIndex,
+    required List<int> chunkBytes,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/attachments/upload/$blobId/chunk/$chunkIndex');
+    print('[AuthApiClient] Sending POST binary request to: $url');
+    final response = await _client.post(
+      url,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Authorization': 'Bearer $sessionToken',
+      },
+      body: chunkBytes,
+    );
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+  }
+
+  Future<void> bindAttachment({
+    required String sessionToken,
+    required String blobId,
+    required String messageId,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/attachments/bind');
+    print('[AuthApiClient] Sending POST request to: $url');
+    final response = await _client.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $sessionToken',
+      },
+      body: jsonEncode({
+        'blob_id': blobId,
+        'message_id': messageId,
+      }),
+    );
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+  }
+
+  Future<List<int>> downloadAttachment({
+    required String sessionToken,
+    required String blobId,
+  }) async {
+    final url = Uri.parse('$baseUrl/api/v1/attachments/download/$blobId');
+    print('[AuthApiClient] Sending GET request to: $url');
+    final response = await _client.get(
+      url,
+      headers: {
+        'Authorization': 'Bearer $sessionToken',
+      },
+    );
+    if (response.statusCode != 200) {
+      throw Exception(response.body);
+    }
+    return response.bodyBytes;
+  }
 }
